@@ -283,8 +283,8 @@ if __name__ != "__main__":
             self._verify_instruction_id = warmup["id"]
             self._verify_translation = "" if self._hide_translation else warmup.get("translation_zh", "")
 
-            # Match the single-instruction invocation exactly: the same
-            # <INSTRUCTION_FOLLOWING> path and the same keep-lane text are used.
+            # Match the single-instruction invocation exactly, using the
+            # existing S1-03 acceleration text to request startup.
             self._set_instruction_following(warmup["instruction"])
             self._sequence_last_transition_status = "warmup"
 
@@ -439,8 +439,8 @@ if __name__ != "__main__":
                 ) / float(self.config.carla_fps)
                 if elapsed_s >= timeout_s:
                     raise RuntimeError(
-                        "Scene 1 warm-up failed: the single-instruction-compatible "
-                        "keep-lane call did not reach "
+                        "Scene 1 warm-up failed: instruction "
+                        f"{self._sequence_warmup['instruction']!r} did not reach "
                         f"{min_speed_mps:.1f} m/s for {consecutive_ticks} consecutive "
                         f"ticks within {timeout_s:.1f} simulation seconds "
                         f"(current speed {current_speed_mps:.1f} m/s)"
@@ -847,7 +847,7 @@ def _run_case(
         if warmup:
             trigger = warmup["advance_when"]
             print(
-                "Warm-up (not scored): single-instruction-compatible keep-lane call until "
+                f"Warm-up (not scored): {warmup['instruction']} until "
                 f"{float(trigger['min_speed_mps']):.1f} m/s for "
                 f"{int(trigger['consecutive_ticks'])} consecutive ticks"
             )
@@ -939,11 +939,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     if sequence_config is not None:
         first_phase = sequence_config["phases"][0]
+        initial_input = sequence_config.get("warmup") or first_phase
         sequence_item = {
             "id": "S1-SEQUENCE",
             "scene_id": "S1",
             "scene_name": "Basic voice-controlled driving (chained custom route)",
-            "instruction": first_phase["instruction"],
+            "instruction": initial_input["instruction"],
             "expected_behavior": "Execute all five Scene 1 commands in order on one continuous route.",
         }
         route_id = sequence_config["route_id"]
@@ -952,7 +953,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         return _run_case(
             args,
             sequence_item,
-            first_phase.get("translation_zh", ""),
+            initial_input.get("translation_zh", ""),
             route_id,
             known_routes[route_id],
             checkpoint,

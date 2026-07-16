@@ -45,14 +45,14 @@ must not be counted as a complete competition-scene pass.
 
 `--scene1-sequence` is separate from the ordinary presets. It runs one
 continuous, 2.2 km clear-day Town12 route. It first invokes the same
-`<INSTRUCTION_FOLLOWING>` keep-lane input as the standalone S1-01 test during
-a non-scored start-up observation. After the ego speed stays at or above
-1.5 m/s for three ticks, phase-one distance measurement begins without
-changing the keep-lane prompt. The remaining command order is: accelerate to
-60 km/h, turn right, change one lane to the left, then slow to 40 km/h. If the
-warm-up cannot reach the threshold within 10 simulation seconds, the run
-fails explicitly instead of remaining stuck in the keep-lane phase. Moving
-background traffic,
+`<INSTRUCTION_FOLLOWING>` path as a standalone test and sends the existing
+S1-03 instruction `Accelerate to sixty kilometers per hour.` as a non-scored
+start-up command. After the ego speed stays at or above 1.5 m/s for three
+ticks, it switches to the first scored command, keep lane, and measures that
+phase for 150 m. The remaining command order is: accelerate to 60 km/h, turn
+right, change one lane to the left, then slow to 40 km/h. If the warm-up cannot
+reach the threshold within 10 simulation seconds, the run fails explicitly
+instead of remaining stuck. Moving background traffic,
 parked-vehicle spawning, and active Bench2Drive scenarios are disabled for
 this isolated basic-command check. Phase changes are printed in the terminal,
 shown in Pygame, and saved to

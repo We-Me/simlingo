@@ -4,7 +4,7 @@
   "route_file": "routes/scene1_basic_sequence.xml",
   "notes": [
     "Only the English instruction field is passed to SimLingo.",
-    "A non-scored warm-up uses the same instruction-following call as the single-command test before phase-one measurement begins.",
+    "A non-scored warm-up sends the existing S1-03 acceleration instruction before phase-one measurement begins.",
     "The route is clear daytime and has no active Bench2Drive scenarios.",
     "Its off-map metadata anchor only works around the evaluator's scenario_configs[0] assumption and is filtered before scenario construction.",
     "Moving background traffic and parked-vehicle spawning are disabled only for this isolated Scene 1 run.",
@@ -16,9 +16,9 @@
   "warmup": {
     "id": "S1-WARMUP",
     "mode": "instruction_following",
-    "instruction": "Keep the vehicle in the current lane.",
-    "translation_zh": "非计分起步观察：保持车辆在当前车道内行驶。",
-    "expected_behavior": "Use the same model input as the single S1-01 test and begin phase-one measurement only after the ego is moving.",
+    "instruction": "Accelerate to sixty kilometers per hour.",
+    "translation_zh": "非计分起步指令：加速到每小时六十公里。达到起步阈值后立即切换。",
+    "expected_behavior": "Start route following with the existing S1-03 instruction and switch to phase one as soon as the low startup-speed threshold is met.",
     "advance_when": {
       "type": "speed",
       "min_speed_mps": 1.5,
