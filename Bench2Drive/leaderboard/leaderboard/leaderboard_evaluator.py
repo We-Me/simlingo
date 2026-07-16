@@ -206,7 +206,18 @@ class LeaderboardEvaluator(object):
         """
         self.carla_path = os.environ["CARLA_ROOT"]
         args.port = find_free_port(args.port)
-        cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')} -RenderOffScreen -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
+        render_offscreen = os.environ.get('CARLA_RENDER_OFFSCREEN', '1').lower() in (
+            '1', 'true', 'yes', 'on'
+        )
+        if render_offscreen:
+            render_flag = ' -RenderOffScreen'
+        else:
+            window_width = int(os.environ.get('CARLA_WINDOW_WIDTH', '1280'))
+            window_height = int(os.environ.get('CARLA_WINDOW_HEIGHT', '720'))
+            if window_width <= 0 or window_height <= 0:
+                raise ValueError('CARLA_WINDOW_WIDTH/HEIGHT must be positive integers')
+            render_flag = f' -windowed -ResX={window_width} -ResY={window_height}'
+        cmd1 = f"{os.path.join(self.carla_path, 'CarlaUE4.sh')}{render_flag} -nosound -carla-rpc-port={args.port} -graphicsadapter={args.gpu_rank}"
         self.server = subprocess.Popen(cmd1, shell=True, preexec_fn=os.setsid)
         print(cmd1, self.server.returncode, flush=True)
         atexit.register(os.killpg, self.server.pid, signal.SIGKILL)

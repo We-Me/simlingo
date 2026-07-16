@@ -202,6 +202,38 @@ With the default config, the training logs to Wandb. Login is required. We also 
 The model file can be downloaded from huggingface: https://huggingface.co/RenzKa/simlingo.
 If you only want to perfrom closed-loop driving evaluation, there is no need to download our dataset.
 
+### Closed-loop launch scripts
+
+Linux launch scripts are provided for local SimLingo evaluation. They temporarily set
+`HF_ENDPOINT=https://hf-mirror.com` for model downloads and activate the `simlingo` Conda environment created from
+`environment.yaml`. Override `HF_ENDPOINT`, `CONDA_ENV`, or `CONDA_SH` when different values are required.
+
+```bash
+# Download only the config and checkpoint required for evaluation. Files are
+# stored under the git-ignored pretrained/simlingo directory.
+bash scripts/download_simlingo_model.sh
+
+# CARLA Leaderboard: all routes in routes_validation.xml
+bash scripts/eval_leaderboard_simlingo.sh
+
+# Bench2Drive: all 220 routes
+bash scripts/eval_bench2drive_simlingo.sh
+
+# Visual demos: one route, with separate CARLA and Pygame windows
+bash scripts/demo_leaderboard_simlingo.sh
+bash scripts/demo_bench2drive_simlingo.sh
+```
+
+The scripts use `~/carla/carla0915` as `CARLA_ROOT` by default. Set `CARLA_ROOT` explicitly to override it.
+The default checkpoint is `pretrained/simlingo/checkpoints/epoch=013.ckpt/pytorch_model.pt`; set `CHECKPOINT` to
+override it.
+Run any script with `--help` to see path, GPU, port, and resume overrides. The Leaderboard script starts and
+cleans up CARLA itself; the Bench2Drive evaluator manages its own CARLA process.
+The two demo scripts run route `0` (Leaderboard) and route `1711` (Bench2Drive) by default. Set `ROUTE_ID` to
+choose another route, for example `ROUTE_ID=2 bash scripts/demo_leaderboard_simlingo.sh`. Run demos from a Linux
+desktop session; they require a working `DISPLAY` or `WAYLAND_DISPLAY`. Closing the Pygame window disables the
+live view while the route continues; use `Ctrl+C` in the terminal to stop the demo.
+
 
 ### Bench2Drive
 Bench2Drive is a CARLA benchmark proposed by the paper [Bench2Drive: Towards Multi-Ability Benchmarking of Closed-Loop End-To-End Autonomous Driving](https://arxiv.org/abs/2406.03877). It consists of 220 very short (~150m) routes split across all towns with 1 safety critical scenario in each route.

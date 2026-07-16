@@ -11,6 +11,7 @@ import os
 import pathlib
 import random
 import sys
+import textwrap
 import time
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -62,6 +63,14 @@ DEBUG = False # saves images during evaluation
 HD_VIZ = False
 USE_UKF = True
 
+
+def _env_flag(name, default=False):
+    """Read a boolean environment variable without changing eval defaults."""
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ('1', 'true', 'yes', 'on')
+
 class LingoAgent(autonomous_agent.AutonomousAgent):
     """
         Main class that runs the agents with the run_step function
@@ -98,6 +107,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         self.user_flag = None
         self.running = True
         self.custom_prompt = None
+        self.viz_enabled = _env_flag('SIMLINGO_VIZ')
+        self._pygame = None
+        self._viz_screen = None
+        self._viz_font = None
+        self._viz_small_font = None
         
         self.LMDRIVE_AUGM = False
         if self.LMDRIVE_AUGM:
@@ -234,6 +248,40 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         if DEBUG:
             self.save_path_img = self.debug_save_path + '/images'
             Path(self.save_path_img).mkdir(parents=True, exist_ok=True)
+
+        if self.viz_enabled:
+            self._init_live_viz()
+
+    def _init_live_viz(self):
+        """Create the Pygame window after the model has finished loading."""
+        try:
+            import pygame
+
+            pygame.init()
+            viz_width = int(os.environ.get('SIMLINGO_VIZ_WIDTH', '1280'))
+            viz_height = int(os.environ.get('SIMLINGO_VIZ_HEIGHT', '800'))
+            if viz_width < 640 or viz_height < 480:
+                raise ValueError('SIMLINGO_VIZ_WIDTH/HEIGHT must be at least 640x480')
+            self._pygame = pygame
+            self._viz_screen = pygame.display.set_mode(
+                (viz_width, viz_height), pygame.RESIZABLE | pygame.DOUBLEBUF
+            )
+            pygame.display.set_caption(
+                os.environ.get('SIMLINGO_VIZ_TITLE', 'SimLingo live driving demo')
+            )
+            self._viz_font = pygame.font.SysFont('DejaVu Sans', 22)
+            self._viz_small_font = pygame.font.SysFont('DejaVu Sans', 17)
+            self._viz_screen.fill((14, 16, 20))
+            loading = self._viz_font.render(
+                'Waiting for the first CARLA frame...', True, (225, 228, 235)
+            )
+            self._viz_screen.blit(loading, (24, 24))
+            pygame.display.flip()
+        except Exception as exc:
+            raise RuntimeError(
+                'Unable to create the SimLingo Pygame window. Run from a graphical '
+                'desktop with DISPLAY/WAYLAND_DISPLAY set, or unset SIMLINGO_VIZ.'
+            ) from exc
             
     def input_thread(self):
         while self.running:
@@ -669,6 +717,9 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
     def run_step(self, input_data, timestamp, sensors=None):  # pylint: disable=locally-disabled, unused-argument
         self.step += 1
 
+        if self.viz_enabled:
+            self._poll_live_viz_events()
+
         if not self.initialized:
             self._init()
             control = carla.VehicleControl(steer=0.0, throttle=0.0, brake=1.0)
@@ -748,7 +799,6 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                     y_dist = 30
                     y_start = H + 20
                 font = ImageFont.truetype("arial.ttf", font_size)
-                import textwrap
                 lines = textwrap.wrap(f"Prompt: {self.prompt}", width=line_width)
                 for idx, line in enumerate(lines):
                         draw.text((10, y_start + y_dist*(idx)), line, font=font, fill=(255, 255, 255, 255))
@@ -797,7 +847,170 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
                 json.dump(self.metric_info, outfile, indent=4)
                 outfile.close()
 
+        if self.viz_enabled:
+            self._render_live_viz(
+                pred_speed_wps=pred_speed_wps,
+                pred_route=pred_route,
+                language=language,
+                speed=gt_velocity,
+                control=control,
+            )
+
         return control
+
+    def _render_live_viz(self, pred_speed_wps, pred_route, language, speed, control):
+        """Render model predictions without adding an extra CARLA sensor."""
+        pygame = self._pygame
+        if pygame is None or self._viz_screen is None:
+            return
+
+        self._poll_live_viz_events()
+        if not self.viz_enabled:
+            return
+
+        camera = self.hd_cam_for_viz if HD_VIZ else self.camera_for_viz
+        frame = cv2.cvtColor(camera.copy(), cv2.COLOR_BGR2RGB)
+        frame_height, frame_width = frame.shape[:2]
+
+        tvec = None
+        rvec = None
+        if HD_VIZ:
+            tvec = np.array([[0.0, 3.5, 5.5]], np.float32)
+            cam_rots = [0.0, -15.0, 0.0]
+            rot_matrix = get_rotation_matrix(-cam_rots[0], -cam_rots[1], cam_rots[2])
+            rvec = cv2.Rodrigues(rot_matrix[:3, :3])[0].flatten()
+
+        camera_intrinsics = np.asarray(get_camera_intrinsics(frame_width, frame_height, 110))
+
+        def draw_projected(points, color, radius):
+            if points is None:
+                return
+            if torch.is_tensor(points):
+                points = points.detach().float().cpu().numpy()
+            points = np.asarray(points)
+            if points.ndim == 3:
+                points = points[0]
+            try:
+                points_2d = project_points(
+                    points, camera_intrinsics, tvec=tvec, rvec=rvec
+                )
+            except (ValueError, TypeError, IndexError):
+                return
+            for point in points_2d:
+                if not np.all(np.isfinite(point)):
+                    continue
+                x, y = int(point[0]), int(point[1])
+                if 0 <= x < frame_width and 0 <= y < frame_height:
+                    cv2.circle(frame, (x, y), radius, color, -1, lineType=cv2.LINE_AA)
+
+        # RGB colors: target=blue, route=red, speed waypoints=green.
+        draw_projected(self.target_points, (0, 120, 255), 6)
+        draw_projected(pred_route, (255, 70, 70), 5)
+        draw_projected(pred_speed_wps, (70, 255, 90), 4)
+
+        screen_width, screen_height = self._viz_screen.get_size()
+        panel_height = min(260, max(230, screen_height // 3))
+        image_area_height = screen_height - panel_height
+        scale = min(screen_width / frame_width, image_area_height / frame_height)
+        render_size = (
+            max(1, int(frame_width * scale)),
+            max(1, int(frame_height * scale)),
+        )
+
+        frame_surface = pygame.image.frombuffer(
+            frame.tobytes(), (frame_width, frame_height), 'RGB'
+        )
+        frame_surface = pygame.transform.smoothscale(frame_surface, render_size)
+
+        self._viz_screen.fill((14, 16, 20))
+        image_x = (screen_width - render_size[0]) // 2
+        image_y = (image_area_height - render_size[1]) // 2
+        self._viz_screen.blit(frame_surface, (image_x, image_y))
+        pygame.draw.line(
+            self._viz_screen, (65, 69, 78),
+            (0, image_area_height), (screen_width, image_area_height), 1
+        )
+
+        if torch.is_tensor(speed):
+            speed = speed.detach().float().cpu().numpy()
+        speed_value = float(np.asarray(speed).reshape(-1)[0])
+        status = (
+            f'Speed {speed_value * 3.6:5.1f} km/h    '
+            f'Steer {control.steer:+.3f}    Throttle {control.throttle:.3f}    '
+            f'Brake {float(control.brake):.0f}'
+        )
+        panel_y = image_area_height + 12
+        self._viz_screen.blit(
+            self._viz_font.render(status, True, (240, 240, 244)), (18, panel_y)
+        )
+
+        legend_y = panel_y + 34
+        legend_items = (
+            ('Target', (0, 120, 255)),
+            ('Predicted route', (255, 70, 70)),
+            ('Speed waypoints', (70, 255, 90)),
+        )
+        legend_x = 20
+        for label, color in legend_items:
+            pygame.draw.circle(self._viz_screen, color, (legend_x + 5, legend_y + 9), 5)
+            label_surface = self._viz_small_font.render(label, True, (190, 194, 202))
+            self._viz_screen.blit(label_surface, (legend_x + 16, legend_y))
+            legend_x += label_surface.get_width() + 48
+
+        answer = ''
+        if language:
+            answer = language[0] if isinstance(language, (list, tuple)) else language
+        text_y = legend_y + 30
+        text_y = self._draw_wrapped_viz_text(
+            f'Prompt: {self.prompt}', text_y, (170, 178, 190), max_lines=2
+        )
+        self._draw_wrapped_viz_text(
+            f'Answer: {answer}', text_y + 3, (244, 225, 145), max_lines=4
+        )
+
+        pygame.display.flip()
+
+    def _poll_live_viz_events(self):
+        """Keep the demo window responsive without affecting vehicle control."""
+        pygame = self._pygame
+        if pygame is None or self._viz_screen is None:
+            return
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                    event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                self.viz_enabled = False
+                pygame.display.quit()
+                self._viz_screen = None
+                print('SimLingo visualization closed; evaluation continues in the terminal.', flush=True)
+                return
+
+    def _draw_wrapped_viz_text(self, text, y, color, max_lines):
+        """Draw pixel-width-wrapped text and return the next y coordinate."""
+        screen_width, _ = self._viz_screen.get_size()
+        max_width = screen_width - 36
+        words = str(text).replace('\n', ' ').split()
+        lines = []
+        current = ''
+        for word in words:
+            candidate = word if not current else f'{current} {word}'
+            if self._viz_small_font.size(candidate)[0] <= max_width:
+                current = candidate
+            else:
+                if current:
+                    lines.append(current)
+                current = word
+                if len(lines) >= max_lines:
+                    break
+        if current and len(lines) < max_lines:
+            lines.append(current)
+        if len(lines) == max_lines and words:
+            lines[-1] = textwrap.shorten(lines[-1], width=max(10, len(lines[-1]) - 1), placeholder='...')
+
+        line_height = self._viz_small_font.get_linesize()
+        for line in lines:
+            self._viz_screen.blit(self._viz_small_font.render(line, True, color), (18, y))
+            y += line_height
+        return y
 
     def control_pid(self, route_waypoints, velocity, speed_waypoints):
         """
@@ -861,6 +1074,11 @@ class LingoAgent(autonomous_agent.AutonomousAgent):
         The leaderboard client doesn't properly clear up the agent after the route finishes so we need to do it here.
         Also writes logging files to disk.
         """
+
+        if self._pygame is not None:
+            self._pygame.quit()
+            self._pygame = None
+            self._viz_screen = None
 
         del self.model
         del self.config
