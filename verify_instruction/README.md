@@ -17,6 +17,9 @@ bash verify_instruction/run_verify_instruction.sh --instruction-id S1-03
 # Run all core competition instructions
 bash verify_instruction/run_verify_instruction.sh --preset core
 
+# Run the complete 30-instruction suite
+bash verify_instruction/run_verify_instruction.sh --preset all
+
 # Add Town13 emergency cases
 bash verify_instruction/run_verify_instruction.sh --preset town13-emergency
 ```

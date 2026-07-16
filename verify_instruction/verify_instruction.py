@@ -246,6 +246,8 @@ def _select_instruction_ids(args, instructions: Mapping[str, dict]) -> List[str]
             for item_id, item in instructions.items()
             if item["priority"] == "core"
         ]
+    if args.preset == "all":
+        return list(instructions)
     return list(PRESETS[args.preset or "three-scenes"])
 
 
@@ -259,7 +261,7 @@ def _build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--scene", choices=("S1", "S2", "S3"), help="Run one scene's suite")
     selection.add_argument(
         "--preset",
-        choices=("three-scenes", "core", "town13-emergency"),
+        choices=("three-scenes", "core", "all", "town13-emergency"),
         help="Run a predefined group; the default covers all three basic-track scenes",
     )
     selection.add_argument("--list", action="store_true", help="List instructions without running CARLA")

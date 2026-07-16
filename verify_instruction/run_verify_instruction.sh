@@ -19,6 +19,9 @@ Examples:
   # Run core commands from the complex-obstacle scene.
   bash verify_instruction/run_verify_instruction.sh --scene S2 --core-only
 
+  # Run all 30 English instructions.
+  bash verify_instruction/run_verify_instruction.sh --preset all
+
   # Validate route placement and evaluator commands without starting CARLA.
   bash verify_instruction/run_verify_instruction.sh --preset three-scenes --dry-run
 
