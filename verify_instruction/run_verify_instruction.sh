@@ -16,6 +16,9 @@ Examples:
   # Run one command on its recommended route.
   bash verify_instruction/run_verify_instruction.sh --instruction-id S1-03
 
+  # Chain the five Scene 1 commands on the custom 2.2 km Town12 route.
+  bash verify_instruction/run_verify_instruction.sh --scene1-sequence
+
   # Run core commands from the complex-obstacle scene.
   bash verify_instruction/run_verify_instruction.sh --scene S2 --core-only
 

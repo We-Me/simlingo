@@ -1,0 +1,67 @@
+{
+  "suite_name": "Scene 1 chained basic-command verification",
+  "route_id": "9001",
+  "route_file": "routes/scene1_basic_sequence.xml",
+  "notes": [
+    "Only the English instruction field is passed to SimLingo.",
+    "The route is clear daytime and has no active Bench2Drive scenarios.",
+    "Its off-map metadata anchor only works around the evaluator's scenario_configs[0] assumption and is filtered before scenario construction.",
+    "Moving background traffic and parked-vehicle spawning are disabled only for this isolated Scene 1 run.",
+    "The 2.2 km geometry is cropped from Town12 training route 11, waypoints 5 through 12.",
+    "The right-turn phase is synchronized with the expected navigation command near 0.75 km and fails explicitly if that command is missed.",
+    "The post-turn westbound road is used by the source route's same-direction ConstructionObstacle and ParkedObstacle scenarios, providing a legal left-lane opportunity without instantiating those scenarios here.",
+    "The final speed commands preserve the competition units; separate m/s diagnostics remain available in the single-command suite."
+  ],
+  "phases": [
+    {
+      "id": "S1-SEQ-01",
+      "instruction": "Keep the vehicle in the current lane.",
+      "translation_zh": "保持车辆在当前车道内行驶。",
+      "expected_behavior": "Remain centered in the current lane during the initial segment.",
+      "advance_when": {
+        "type": "distance",
+        "at_m": 150
+      }
+    },
+    {
+      "id": "S1-SEQ-02",
+      "instruction": "Accelerate to sixty kilometers per hour.",
+      "translation_zh": "加速到每小时六十公里。",
+      "expected_behavior": "Increase speed smoothly toward 60 km/h while respecting safety constraints.",
+      "advance_when": {
+        "type": "nav_command",
+        "value": 2,
+        "after_m": 550,
+        "deadline_m": 950
+      }
+    },
+    {
+      "id": "S1-SEQ-03",
+      "instruction": "Turn right at the next intersection.",
+      "translation_zh": "在下一个路口右转。",
+      "expected_behavior": "Follow the route's next right-turn branch without leaving the legal lane.",
+      "advance_when": {
+        "type": "nav_command_complete",
+        "value": 2,
+        "min_active_m": 15,
+        "max_active_m": 300
+      }
+    },
+    {
+      "id": "S1-SEQ-04",
+      "instruction": "Change to the lane on the left when it is safe.",
+      "translation_zh": "确认安全后变到左侧车道。",
+      "expected_behavior": "Complete one safe left lane change and stabilize in the adjacent lane.",
+      "advance_when": {
+        "type": "lane_change_or_distance",
+        "max_active_m": 250
+      }
+    },
+    {
+      "id": "S1-SEQ-05",
+      "instruction": "Slow down to forty kilometers per hour.",
+      "translation_zh": "减速到每小时四十公里。",
+      "expected_behavior": "Reduce speed smoothly toward 40 km/h and continue following the route."
+    }
+  ]
+}

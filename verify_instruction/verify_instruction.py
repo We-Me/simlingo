@@ -3,9 +3,10 @@
 
 When executed directly this file is a small test orchestrator.  When imported
 by the Leaderboard evaluator it exposes InstructionLingoAgent, a thin wrapper
-around the repository's regular LingoAgent.  The wrapper only injects one
-English instruction and adds a display-only translation overlay; it does not
-change the base driving or control implementation.
+around the repository's regular LingoAgent.  The wrapper injects either one
+English instruction or a declarative sequence and adds a display-only
+translation overlay; it does not change the base driving or control
+implementation.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SUITE_PATH = Path(__file__).with_name("instructions_en.json")
 TRANSLATION_PATH = Path(__file__).with_name("instructions_zh.json")
+SCENE1_ROUTE_PATH = Path(__file__).with_name("routes") / "scene1_basic_sequence.xml"
+SCENE1_SEQUENCE_PATH = Path(__file__).with_name("scene1_sequence.json")
 
 
 def get_entry_point() -> str:
@@ -36,6 +39,7 @@ def get_entry_point() -> str:
 # placement.  "partial" means the stock route covers only part of a compound
 # instruction, which is printed as a warning before execution.
 ROUTE_BINDINGS: Mapping[str, Tuple[str, str, str]] = {
+    "S1-SEQUENCE": ("9001", "Town12", "custom: 2.2 km, clear daytime, no active scenarios"),
     "S1-01": ("3178", "Town12", "compatible: clear daytime vanilla route"),
     "S1-02": ("3178", "Town12", "compatible: clear daytime vanilla route"),
     "S1-03": ("3178", "Town12", "partial: clear daytime; verify the speed limit before judging 60 km/h"),
@@ -76,6 +80,53 @@ PRESETS: Mapping[str, Sequence[str]] = {
 }
 
 
+def _load_sequence_config(path: Path) -> dict:
+    """Load and validate the small declarative instruction schedule."""
+
+    with path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+
+    route_id = config.get("route_id")
+    phases = config.get("phases")
+    if not isinstance(route_id, str) or not route_id:
+        raise ValueError(f"Sequence route_id must be a non-empty string: {path}")
+    if not isinstance(phases, list) or not phases:
+        raise ValueError(f"Instruction sequence has no phases: {path}")
+
+    supported_triggers = {
+        "distance",
+        "nav_command",
+        "nav_command_complete",
+        "lane_change_or_distance",
+    }
+    phase_ids = set()
+    for index, phase in enumerate(phases):
+        phase_id = phase.get("id")
+        instruction = phase.get("instruction")
+        if not isinstance(phase_id, str) or not phase_id:
+            raise ValueError(f"Sequence phase {index + 1} has no id: {path}")
+        if phase_id in phase_ids:
+            raise ValueError(f"Duplicate sequence phase id {phase_id}: {path}")
+        phase_ids.add(phase_id)
+        if not isinstance(instruction, str) or not instruction.strip():
+            raise ValueError(f"Sequence phase {phase_id} has no English instruction: {path}")
+
+        trigger = phase.get("advance_when")
+        is_last = index == len(phases) - 1
+        if is_last and trigger is not None:
+            raise ValueError(f"Final sequence phase {phase_id} must remain active to route end")
+        if not is_last:
+            if not isinstance(trigger, dict):
+                raise ValueError(f"Sequence phase {phase_id} has no advance_when rule")
+            trigger_type = trigger.get("type")
+            if trigger_type not in supported_triggers:
+                raise ValueError(
+                    f"Unsupported trigger {trigger_type!r} in sequence phase {phase_id}"
+                )
+
+    return config
+
+
 if __name__ != "__main__":
     # Heavy model/CARLA imports are intentionally skipped in the lightweight
     # parent process that launches the evaluator.  This prevents the launcher
@@ -87,10 +138,35 @@ if __name__ != "__main__":
     from team_code import scenario_logger as _scenario_logger
 
     sys.modules.setdefault("scenario_logger", _scenario_logger)
+
+    if os.environ.get("SIMLINGO_DISABLE_BACKGROUND", "0") == "1":
+        # RouteScenario creates moving background traffic and periodically
+        # spawns parked meshes even without active route scenarios. Disable
+        # both only for the isolated Scene 1 command run.
+        from leaderboard.scenarios import route_scenario as _route_scenario
+        from srunner.scenariomanager.scenarioatomics.atomic_behaviors import Idle as _Idle
+
+        def _disabled_background_behavior(*_args, **kwargs):
+            return _Idle(name=kwargs.get("name", "BackgroundActivityDisabled"))
+
+        def _disabled_parked_vehicle_spawning(*_args, **_kwargs):
+            return None
+
+        _route_scenario.BackgroundBehavior = _disabled_background_behavior
+        _route_scenario.RouteScenario.spawn_parked_vehicles = _disabled_parked_vehicle_spawning
+        print(
+            "[scene1] Moving traffic and parked-vehicle spawning disabled for the "
+            "isolated basic-command route.",
+            flush=True,
+        )
+
+    import carla as _carla
+
     from team_code.agent_simlingo import LingoAgent as _BaseLingoAgent
+    from srunner.scenariomanager.carla_data_provider import CarlaDataProvider
 
     class InstructionLingoAgent(_BaseLingoAgent):
-        """Base SimLingo agent with one immutable English instruction."""
+        """SimLingo agent with either one instruction or a Scene 1 sequence."""
 
         def setup(self, path_to_conf_file, route_index=None):
             instruction = os.environ.get("SIMLINGO_INSTRUCTION_TEXT", "").strip()
@@ -109,14 +185,247 @@ if __name__ != "__main__":
             self.custom_prompt = instruction
             self._verify_instruction_id = os.environ.get("SIMLINGO_INSTRUCTION_ID", "")
             self._verify_translation = os.environ.get("SIMLINGO_INSTRUCTION_TRANSLATION", "")
+            self._hide_translation = os.environ.get("SIMLINGO_HIDE_TRANSLATION", "0") == "1"
             self._verify_translation_font = self._load_translation_font()
+            self._sequence_phases = None
+            self._sequence_index = 0
+            self._sequence_total_distance = None
+            self._sequence_progress_m = 0.0
+            self._sequence_phase_start_m = 0.0
+            self._sequence_seen_nav_command = False
+            self._sequence_origin_lane = None
+            self._sequence_lane_opportunity_seen = False
+            self._sequence_last_transition_status = "start"
+            self._sequence_pending_transition = None
+            self._sequence_log_path = os.environ.get("SIMLINGO_SEQUENCE_LOG", "")
 
+            sequence_path = os.environ.get("SIMLINGO_SEQUENCE_PATH", "").strip()
+            if sequence_path:
+                sequence_config = _load_sequence_config(Path(sequence_path))
+                self._sequence_phases = sequence_config["phases"]
+                self._activate_sequence_phase(0, "route start", status="start")
+
+            if not self._sequence_phases:
+                print(
+                    f"[instruction] {self._verify_instruction_id}: {self.custom_prompt}",
+                    flush=True,
+                )
+                if self._verify_translation:
+                    print(f"[display-only translation] {self._verify_translation}", flush=True)
+
+        def _init(self):
+            super()._init()
+            if self._sequence_phases:
+                self._sequence_total_distance = float(sum(self._route_planner.route_distances))
+                print(
+                    f"[scene1] Interpolated route length: {self._sequence_total_distance:.1f} m",
+                    flush=True,
+                )
+
+        def tick(self, input_data):
+            # Apply transitions at the start of a model tick so the English
+            # prompt, Chinese overlay, and inference always describe the same
+            # active phase. Trigger observations are collected one tick earlier.
+            if self._sequence_pending_transition is not None:
+                next_index, reason, status = self._sequence_pending_transition
+                self._sequence_pending_transition = None
+                self._activate_sequence_phase(next_index, reason, status=status)
+            result = super().tick(input_data)
+            if self._sequence_phases and self._sequence_total_distance is not None:
+                self._update_instruction_sequence()
+            return result
+
+        def _activate_sequence_phase(self, index, reason, status="observed"):
+            self._sequence_index = index
+            phase = self._sequence_phases[index]
+            self._verify_instruction_id = phase["id"]
+            self.user_command = phase["instruction"]
+            self.custom_prompt = phase["instruction"]
+            self._verify_translation = "" if self._hide_translation else phase.get("translation_zh", "")
+            self._sequence_phase_start_m = self._sequence_progress_m
+            self._sequence_seen_nav_command = False
+            self._sequence_origin_lane = None
+            self._sequence_lane_opportunity_seen = False
+            self._sequence_last_transition_status = status
+
+            trigger = phase.get("advance_when") or {}
+            if trigger.get("type") == "nav_command_complete":
+                target_value = int(trigger["value"])
+                self._sequence_seen_nav_command = (
+                    self._nav_command_value(self.last_command_tmp) == target_value
+                )
+            elif trigger.get("type") == "lane_change_or_distance":
+                self._sequence_origin_lane = self._legal_left_lane_origin()
+                self._sequence_lane_opportunity_seen = self._sequence_origin_lane is not None
+
+            record = {
+                "step": getattr(self, "step", -1),
+                "progress_m": round(self._sequence_progress_m, 2),
+                "phase_index": index,
+                "phase_id": phase["id"],
+                "instruction": phase["instruction"],
+                "translation_zh": phase.get("translation_zh", ""),
+                "reason": reason,
+                "transition_status": status,
+            }
             print(
-                f"[instruction] {self._verify_instruction_id}: {self.custom_prompt}",
+                f"[scene1 phase {index + 1}/{len(self._sequence_phases)}] "
+                f"{phase['id']} at {self._sequence_progress_m:.1f} m: "
+                f"{phase['instruction']} ({status}: {reason})",
                 flush=True,
             )
             if self._verify_translation:
                 print(f"[display-only translation] {self._verify_translation}", flush=True)
+            if self._sequence_log_path:
+                with Path(self._sequence_log_path).open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        @staticmethod
+        def _nav_command_value(command):
+            return getattr(command, "value", command)
+
+        @staticmethod
+        def _current_waypoint():
+            try:
+                hero = CarlaDataProvider.get_hero_actor()
+                carla_map = CarlaDataProvider.get_map()
+            except (RuntimeError, ValueError):
+                return None
+            if hero is None or carla_map is None:
+                return None
+            return carla_map.get_waypoint(hero.get_location())
+
+        @classmethod
+        def _current_lane_identity(cls):
+            waypoint = cls._current_waypoint()
+            if waypoint is None:
+                return None
+            return waypoint.road_id, waypoint.lane_id
+
+        @classmethod
+        def _legal_left_lane_origin(cls):
+            waypoint = cls._current_waypoint()
+            if waypoint is None or waypoint.is_junction:
+                return None
+            left_lane = waypoint.get_left_lane()
+            if (
+                left_lane is None
+                or left_lane.lane_type != _carla.LaneType.Driving
+                or left_lane.lane_id * waypoint.lane_id <= 0
+            ):
+                return None
+            lane_change = waypoint.left_lane_marking.lane_change
+            if lane_change not in (_carla.LaneChange.Left, _carla.LaneChange.Both):
+                return None
+            return (
+                waypoint.road_id,
+                waypoint.lane_id,
+                left_lane.road_id,
+                left_lane.lane_id,
+            )
+
+        def _lane_change_completed(self):
+            current_lane = self._current_lane_identity()
+            origin_lane = self._sequence_origin_lane
+            if current_lane is None or origin_lane is None:
+                return False
+            current_road, current_lane_id = current_lane
+            _, _, target_road, target_lane_id = origin_lane
+            return current_road == target_road and current_lane_id == target_lane_id
+
+        def _update_instruction_sequence(self):
+            remaining = float(sum(self._route_planner.route_distances))
+            self._sequence_progress_m = max(0.0, self._sequence_total_distance - remaining)
+            phase = self._sequence_phases[self._sequence_index]
+            trigger = phase.get("advance_when")
+            if not trigger or self._sequence_index >= len(self._sequence_phases) - 1:
+                return
+
+            trigger_type = trigger["type"]
+            active_distance = self._sequence_progress_m - self._sequence_phase_start_m
+            should_advance = False
+            reason = ""
+
+            if trigger_type == "distance":
+                target_distance = float(trigger["at_m"])
+                should_advance = self._sequence_progress_m >= target_distance
+                reason = f"route progress reached {target_distance:.0f} m"
+                transition_status = "scheduled"
+
+            elif trigger_type == "nav_command":
+                nav_value = self._nav_command_value(self.last_command_tmp)
+                target_value = int(trigger["value"])
+                after_m = float(trigger.get("after_m", 0.0))
+                should_advance = self._sequence_progress_m >= after_m and nav_value == target_value
+                reason = f"navigation command {target_value} became active"
+                transition_status = "observed"
+                deadline_m = trigger.get("deadline_m")
+                if (
+                    not should_advance
+                    and deadline_m is not None
+                    and self._sequence_progress_m > float(deadline_m)
+                ):
+                    raise RuntimeError(
+                        "Scene 1 route did not expose navigation command "
+                        f"{target_value} by {float(deadline_m):.0f} m; current command is {nav_value}"
+                    )
+
+            elif trigger_type == "nav_command_complete":
+                nav_value = self._nav_command_value(self.last_command_tmp)
+                target_value = int(trigger["value"])
+                if nav_value == target_value:
+                    self._sequence_seen_nav_command = True
+                min_active_m = float(trigger.get("min_active_m", 10.0))
+                should_advance = (
+                    self._sequence_seen_nav_command
+                    and nav_value != target_value
+                    and active_distance >= min_active_m
+                )
+                reason = f"navigation maneuver {target_value} completed"
+                transition_status = "observed"
+                max_active_m = trigger.get("max_active_m")
+                if (
+                    not should_advance
+                    and max_active_m is not None
+                    and active_distance > float(max_active_m)
+                ):
+                    raise RuntimeError(
+                        "Navigation maneuver did not complete within "
+                        f"{float(max_active_m):.0f} m after phase activation"
+                    )
+
+            elif trigger_type == "lane_change_or_distance":
+                max_active_m = float(trigger.get("max_active_m", 150.0))
+                if self._sequence_origin_lane is None:
+                    self._sequence_origin_lane = self._legal_left_lane_origin()
+                    if self._sequence_origin_lane is not None:
+                        self._sequence_lane_opportunity_seen = True
+                        print(
+                            f"[scene1] Legal same-direction left lane detected at "
+                            f"{self._sequence_progress_m:.1f} m.",
+                            flush=True,
+                        )
+                lane_changed = self._lane_change_completed()
+                should_advance = lane_changed or active_distance >= max_active_m
+                if lane_changed:
+                    reason = "ego entered the adjacent same-direction lane"
+                    transition_status = "observed"
+                elif self._sequence_lane_opportunity_seen:
+                    reason = f"left lane change was not observed within {max_active_m:.0f} m"
+                    transition_status = "not_observed"
+                else:
+                    reason = f"no legal same-direction left lane was found within {max_active_m:.0f} m"
+                    transition_status = "invalid_route"
+
+            else:
+                raise RuntimeError(f"Unsupported sequence trigger type: {trigger_type}")
+
+            if should_advance:
+                self._sequence_pending_transition = (
+                    self._sequence_index + 1,
+                    reason,
+                    transition_status,
+                )
 
         def _load_translation_font(self):
             """Load an optional CJK font without making it a runtime requirement."""
@@ -174,9 +483,15 @@ if __name__ != "__main__":
                 return
 
             width, _ = self._viz_screen.get_size()
+            sequence_status = ""
+            if self._sequence_phases:
+                sequence_status = (
+                    f"[{self._sequence_index + 1}/{len(self._sequence_phases)} | "
+                    f"{self._sequence_progress_m:.0f} m] "
+                )
             lines = self._wrap_overlay_text(
                 self._verify_translation_font,
-                f"用户译文（不输入模型）：{self._verify_translation}",
+                f"{sequence_status}用户译文（不输入模型）：{self._verify_translation}",
                 width - 36,
             )
             overlay_height = 12 + 27 * len(lines)
@@ -229,15 +544,23 @@ def _read_routes(routes_path: Path) -> Dict[str, dict]:
     root = ET.parse(routes_path).getroot()
     routes: Dict[str, dict] = {}
     for route in root.iter("route"):
+        scenario_elements = route.findall("./scenarios/scenario")
         scenario_types = [
             scenario.attrib.get("type", "unknown")
-            for scenario in route.findall("./scenarios/scenario")
+            for scenario in scenario_elements
+            if scenario.attrib.get("metadata_only", "false").lower() != "true"
+        ]
+        metadata_anchors = [
+            scenario.attrib.get("name", "unnamed")
+            for scenario in scenario_elements
+            if scenario.attrib.get("metadata_only", "false").lower() == "true"
         ]
         weather_element = route.find("./weathers/weather")
         weather = dict(weather_element.attrib) if weather_element is not None else {}
         routes[route.attrib["id"]] = {
             "town": route.attrib.get("town", "unknown"),
             "scenarios": scenario_types,
+            "metadata_anchors": metadata_anchors,
             "weather": weather,
         }
     return routes
@@ -286,6 +609,11 @@ def _build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--instruction-id", help="Run one instruction, for example S1-03")
     selection.add_argument("--scene", choices=("S1", "S2", "S3"), help="Run one scene's suite")
     selection.add_argument(
+        "--scene1-sequence",
+        action="store_true",
+        help="Run the chained Scene 1 commands on the custom 2.2 km Town12 route",
+    )
+    selection.add_argument(
         "--preset",
         choices=("three-scenes", "core", "all", "town13-emergency"),
         help="Run a predefined group; the default covers all three basic-track scenes",
@@ -316,6 +644,8 @@ def _validate_runtime(args, checkpoint: Path) -> Tuple[Path, Path]:
     if not routes_path.is_file():
         raise FileNotFoundError(f"Routes XML not found: {routes_path}")
     checkpoint = checkpoint.expanduser().resolve()
+    if args.dry_run:
+        return routes_path, checkpoint
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint}")
     model_config = checkpoint.parent.parent.parent / ".hydra" / "config.yaml"
@@ -338,6 +668,7 @@ def _run_case(
     checkpoint: Path,
     result_root: Path,
     case_index: int,
+    sequence_config: Optional[dict] = None,
 ) -> int:
     case_dir = result_root / item["id"] / f"route_{route_id}"
     save_path = case_dir / "viz"
@@ -370,14 +701,31 @@ def _run_case(
             "SIMLINGO_INSTRUCTION_ID": item["id"],
             "SIMLINGO_INSTRUCTION_TEXT": item["instruction"],
             "SIMLINGO_INSTRUCTION_TRANSLATION": "" if args.hide_translation else translation,
+            "SIMLINGO_HIDE_TRANSLATION": "1" if args.hide_translation else "0",
             "SIMLINGO_VIZ_TITLE": f"SimLingo instruction {item['id']} - route {route_id}",
+            "SIMLINGO_SEQUENCE_PATH": "",
+            "SIMLINGO_SEQUENCE_LOG": "",
+            "SIMLINGO_DISABLE_BACKGROUND": "0",
             "ROUTES": str(args.routes.resolve()),
             "SAVE_PATH": f"{save_path}{os.sep}",
         }
     )
+    if sequence_config is not None:
+        env.update(
+            {
+                "SIMLINGO_SEQUENCE_PATH": str(SCENE1_SEQUENCE_PATH.resolve()),
+                "SIMLINGO_SEQUENCE_LOG": str((case_dir / "sequence_transitions.jsonl").resolve()),
+                "SIMLINGO_DISABLE_BACKGROUND": "1",
+            }
+        )
 
     _print_instruction(item, "" if args.hide_translation else translation, route_id)
-    print(f"CARLA placement: {route_info['town']} / {', '.join(route_info['scenarios'])}")
+    scenario_label = ", ".join(route_info["scenarios"]) or "no active scenarios"
+    print(f"CARLA placement: {route_info['town']} / {scenario_label}")
+    if sequence_config is not None:
+        print("Chained phases:")
+        for index, phase in enumerate(sequence_config["phases"], start=1):
+            print(f"  {index}. {phase['id']}: {phase['instruction']}")
     weather = route_info["weather"]
     if weather:
         print(
@@ -408,6 +756,10 @@ def _run_case(
         "checkpoint": str(checkpoint),
         "command": command,
     }
+    if sequence_config is not None:
+        metadata["instruction_sequence"] = sequence_config
+        metadata["background_traffic_disabled"] = True
+        metadata["parked_vehicle_spawning_disabled"] = True
     (case_dir / "case.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -431,7 +783,13 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if args.route_id and not args.instruction_id:
         parser.error("--route-id is valid only together with --instruction-id")
 
-    selected_ids = _select_instruction_ids(args, instructions)
+    sequence_config = None
+    if args.scene1_sequence:
+        sequence_config = _load_sequence_config(SCENE1_SEQUENCE_PATH)
+        args.routes = SCENE1_ROUTE_PATH
+        selected_ids = ["S1-SEQUENCE"]
+    else:
+        selected_ids = _select_instruction_ids(args, instructions)
     checkpoint_default = Path(
         os.environ.get(
             "CHECKPOINT",
@@ -450,6 +808,30 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     print("Pygame visualization: enabled")
     print(f"Selected tests: {', '.join(selected_ids)}")
     print(f"Results: {result_root}")
+
+    if sequence_config is not None:
+        first_phase = sequence_config["phases"][0]
+        sequence_item = {
+            "id": "S1-SEQUENCE",
+            "scene_id": "S1",
+            "scene_name": "Basic voice-controlled driving (chained custom route)",
+            "instruction": first_phase["instruction"],
+            "expected_behavior": "Execute all five Scene 1 commands in order on one continuous route.",
+        }
+        route_id = sequence_config["route_id"]
+        if route_id not in known_routes:
+            raise ValueError(f"Custom Scene 1 route id {route_id} is missing from {args.routes}")
+        return _run_case(
+            args,
+            sequence_item,
+            first_phase.get("translation_zh", ""),
+            route_id,
+            known_routes[route_id],
+            checkpoint,
+            result_root,
+            0,
+            sequence_config=sequence_config,
+        )
 
     for index, item_id in enumerate(selected_ids):
         item = instructions[item_id]
