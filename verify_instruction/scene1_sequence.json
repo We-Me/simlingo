@@ -4,6 +4,7 @@
   "route_file": "routes/scene1_basic_sequence.xml",
   "notes": [
     "Only the English instruction field is passed to SimLingo.",
+    "A non-scored warm-up uses the same instruction-following call as the single-command test before phase-one measurement begins.",
     "The route is clear daytime and has no active Bench2Drive scenarios.",
     "Its off-map metadata anchor only works around the evaluator's scenario_configs[0] assumption and is filtered before scenario construction.",
     "Moving background traffic and parked-vehicle spawning are disabled only for this isolated Scene 1 run.",
@@ -12,6 +13,19 @@
     "The post-turn westbound road is used by the source route's same-direction ConstructionObstacle and ParkedObstacle scenarios, providing a legal left-lane opportunity without instantiating those scenarios here.",
     "The final speed commands preserve the competition units; separate m/s diagnostics remain available in the single-command suite."
   ],
+  "warmup": {
+    "id": "S1-WARMUP",
+    "mode": "instruction_following",
+    "instruction": "Keep the vehicle in the current lane.",
+    "translation_zh": "非计分起步观察：保持车辆在当前车道内行驶。",
+    "expected_behavior": "Use the same model input as the single S1-01 test and begin phase-one measurement only after the ego is moving.",
+    "advance_when": {
+      "type": "speed",
+      "min_speed_mps": 1.5,
+      "consecutive_ticks": 3,
+      "timeout_s": 10.0
+    }
+  },
   "phases": [
     {
       "id": "S1-SEQ-01",
@@ -19,8 +33,8 @@
       "translation_zh": "保持车辆在当前车道内行驶。",
       "expected_behavior": "Remain centered in the current lane during the initial segment.",
       "advance_when": {
-        "type": "distance",
-        "at_m": 150
+        "type": "phase_distance",
+        "distance_m": 150
       }
     },
     {

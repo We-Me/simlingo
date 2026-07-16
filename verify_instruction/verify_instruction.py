@@ -87,6 +87,7 @@ def _load_sequence_config(path: Path) -> dict:
         config = json.load(handle)
 
     route_id = config.get("route_id")
+    warmup = config.get("warmup")
     phases = config.get("phases")
     if not isinstance(route_id, str) or not route_id:
         raise ValueError(f"Sequence route_id must be a non-empty string: {path}")
@@ -95,11 +96,34 @@ def _load_sequence_config(path: Path) -> dict:
 
     supported_triggers = {
         "distance",
+        "phase_distance",
         "nav_command",
         "nav_command_complete",
         "lane_change_or_distance",
     }
     phase_ids = set()
+    if warmup is not None:
+        if not isinstance(warmup, dict):
+            raise ValueError(f"Sequence warmup must be an object: {path}")
+        warmup_id = warmup.get("id")
+        if not isinstance(warmup_id, str) or not warmup_id:
+            raise ValueError(f"Sequence warmup has no id: {path}")
+        if warmup.get("mode") != "instruction_following":
+            raise ValueError(f"Sequence warmup must use instruction_following mode: {path}")
+        warmup_instruction = warmup.get("instruction")
+        if not isinstance(warmup_instruction, str) or not warmup_instruction.strip():
+            raise ValueError(f"Sequence warmup has no English instruction: {path}")
+        trigger = warmup.get("advance_when")
+        if not isinstance(trigger, dict) or trigger.get("type") != "speed":
+            raise ValueError(f"Sequence warmup must have a speed trigger: {path}")
+        if float(trigger.get("min_speed_mps", 0.0)) <= 0.0:
+            raise ValueError(f"Sequence warmup min_speed_mps must be positive: {path}")
+        if int(trigger.get("consecutive_ticks", 0)) <= 0:
+            raise ValueError(f"Sequence warmup consecutive_ticks must be positive: {path}")
+        if float(trigger.get("timeout_s", 0.0)) <= 0.0:
+            raise ValueError(f"Sequence warmup timeout_s must be positive: {path}")
+        phase_ids.add(warmup_id)
+
     for index, phase in enumerate(phases):
         phase_id = phase.get("id")
         instruction = phase.get("instruction")
@@ -180,14 +204,16 @@ if __name__ != "__main__":
             # user_flag=1 keeps route conditioning and activates the trained
             # <INSTRUCTION_FOLLOWING> prompt.  Only the English string below is
             # passed into the model.
-            self.user_flag = 1
-            self.user_command = instruction
-            self.custom_prompt = instruction
+            self._set_instruction_following(instruction)
             self._verify_instruction_id = os.environ.get("SIMLINGO_INSTRUCTION_ID", "")
             self._verify_translation = os.environ.get("SIMLINGO_INSTRUCTION_TRANSLATION", "")
             self._hide_translation = os.environ.get("SIMLINGO_HIDE_TRANSLATION", "0") == "1"
             self._verify_translation_font = self._load_translation_font()
             self._sequence_phases = None
+            self._sequence_warmup = None
+            self._sequence_warmup_active = False
+            self._sequence_warmup_start_step = None
+            self._sequence_warmup_speed_ticks = 0
             self._sequence_index = 0
             self._sequence_total_distance = None
             self._sequence_progress_m = 0.0
@@ -203,7 +229,11 @@ if __name__ != "__main__":
             if sequence_path:
                 sequence_config = _load_sequence_config(Path(sequence_path))
                 self._sequence_phases = sequence_config["phases"]
-                self._activate_sequence_phase(0, "route start", status="start")
+                self._sequence_warmup = sequence_config.get("warmup")
+                if self._sequence_warmup:
+                    self._activate_sequence_warmup("route start")
+                else:
+                    self._activate_sequence_phase(0, "route start", status="start")
 
             if not self._sequence_phases:
                 print(
@@ -232,15 +262,61 @@ if __name__ != "__main__":
                 self._activate_sequence_phase(next_index, reason, status=status)
             result = super().tick(input_data)
             if self._sequence_phases and self._sequence_total_distance is not None:
-                self._update_instruction_sequence()
+                current_speed_mps = float(input_data["speed"][1]["speed"])
+                self._update_instruction_sequence(current_speed_mps)
             return result
 
+        def _set_instruction_following(self, instruction):
+            """Apply the exact prompt setup shared by single and chained tests."""
+
+            self.user_flag = 1
+            self.user_command = instruction
+            self.custom_prompt = instruction
+
+        def _activate_sequence_warmup(self, reason):
+            """Observe unscored startup before phase-one measurement begins."""
+
+            warmup = self._sequence_warmup
+            self._sequence_warmup_active = True
+            self._sequence_warmup_start_step = None
+            self._sequence_warmup_speed_ticks = 0
+            self._verify_instruction_id = warmup["id"]
+            self._verify_translation = "" if self._hide_translation else warmup.get("translation_zh", "")
+
+            # Match the single-instruction invocation exactly: the same
+            # <INSTRUCTION_FOLLOWING> path and the same keep-lane text are used.
+            self._set_instruction_following(warmup["instruction"])
+            self._sequence_last_transition_status = "warmup"
+
+            record = {
+                "step": getattr(self, "step", -1),
+                "progress_m": round(self._sequence_progress_m, 2),
+                "phase_index": -1,
+                "phase_id": warmup["id"],
+                "mode": "instruction_following",
+                "scored": False,
+                "instruction": warmup["instruction"],
+                "translation_zh": warmup.get("translation_zh", ""),
+                "reason": reason,
+                "transition_status": "warmup",
+            }
+            print(
+                f"[scene1 warm-up] {warmup['id']}: {warmup['instruction']} "
+                f"(not scored; {reason})",
+                flush=True,
+            )
+            if self._verify_translation:
+                print(f"[display-only translation] {self._verify_translation}", flush=True)
+            if self._sequence_log_path:
+                with Path(self._sequence_log_path).open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
         def _activate_sequence_phase(self, index, reason, status="observed"):
+            self._sequence_warmup_active = False
             self._sequence_index = index
             phase = self._sequence_phases[index]
             self._verify_instruction_id = phase["id"]
-            self.user_command = phase["instruction"]
-            self.custom_prompt = phase["instruction"]
+            self._set_instruction_following(phase["instruction"])
             self._verify_translation = "" if self._hide_translation else phase.get("translation_zh", "")
             self._sequence_phase_start_m = self._sequence_progress_m
             self._sequence_seen_nav_command = False
@@ -333,9 +409,44 @@ if __name__ != "__main__":
             _, _, target_road, target_lane_id = origin_lane
             return current_road == target_road and current_lane_id == target_lane_id
 
-        def _update_instruction_sequence(self):
+        def _update_instruction_sequence(self, current_speed_mps):
             remaining = float(sum(self._route_planner.route_distances))
             self._sequence_progress_m = max(0.0, self._sequence_total_distance - remaining)
+
+            if self._sequence_warmup_active:
+                trigger = self._sequence_warmup["advance_when"]
+                min_speed_mps = float(trigger["min_speed_mps"])
+                consecutive_ticks = int(trigger["consecutive_ticks"])
+                timeout_s = float(trigger["timeout_s"])
+
+                if self._sequence_warmup_start_step is None:
+                    self._sequence_warmup_start_step = self.step
+                if current_speed_mps >= min_speed_mps:
+                    self._sequence_warmup_speed_ticks += 1
+                else:
+                    self._sequence_warmup_speed_ticks = 0
+
+                if self._sequence_warmup_speed_ticks >= consecutive_ticks:
+                    self._sequence_pending_transition = (
+                        0,
+                        f"warm-up speed reached {current_speed_mps:.1f} m/s",
+                        "warmup_complete",
+                    )
+                    return
+
+                elapsed_s = (
+                    self.step - self._sequence_warmup_start_step
+                ) / float(self.config.carla_fps)
+                if elapsed_s >= timeout_s:
+                    raise RuntimeError(
+                        "Scene 1 warm-up failed: the single-instruction-compatible "
+                        "keep-lane call did not reach "
+                        f"{min_speed_mps:.1f} m/s for {consecutive_ticks} consecutive "
+                        f"ticks within {timeout_s:.1f} simulation seconds "
+                        f"(current speed {current_speed_mps:.1f} m/s)"
+                    )
+                return
+
             phase = self._sequence_phases[self._sequence_index]
             trigger = phase.get("advance_when")
             if not trigger or self._sequence_index >= len(self._sequence_phases) - 1:
@@ -350,6 +461,12 @@ if __name__ != "__main__":
                 target_distance = float(trigger["at_m"])
                 should_advance = self._sequence_progress_m >= target_distance
                 reason = f"route progress reached {target_distance:.0f} m"
+                transition_status = "scheduled"
+
+            elif trigger_type == "phase_distance":
+                target_distance = float(trigger["distance_m"])
+                should_advance = active_distance >= target_distance
+                reason = f"phase distance reached {target_distance:.0f} m"
                 transition_status = "scheduled"
 
             elif trigger_type == "nav_command":
@@ -485,10 +602,13 @@ if __name__ != "__main__":
             width, _ = self._viz_screen.get_size()
             sequence_status = ""
             if self._sequence_phases:
-                sequence_status = (
-                    f"[{self._sequence_index + 1}/{len(self._sequence_phases)} | "
-                    f"{self._sequence_progress_m:.0f} m] "
-                )
+                if self._sequence_warmup_active:
+                    sequence_status = f"[warm-up | {self._sequence_progress_m:.0f} m] "
+                else:
+                    sequence_status = (
+                        f"[{self._sequence_index + 1}/{len(self._sequence_phases)} | "
+                        f"{self._sequence_progress_m:.0f} m] "
+                    )
             lines = self._wrap_overlay_text(
                 self._verify_translation_font,
                 f"{sequence_status}用户译文（不输入模型）：{self._verify_translation}",
@@ -723,6 +843,14 @@ def _run_case(
     scenario_label = ", ".join(route_info["scenarios"]) or "no active scenarios"
     print(f"CARLA placement: {route_info['town']} / {scenario_label}")
     if sequence_config is not None:
+        warmup = sequence_config.get("warmup")
+        if warmup:
+            trigger = warmup["advance_when"]
+            print(
+                "Warm-up (not scored): single-instruction-compatible keep-lane call until "
+                f"{float(trigger['min_speed_mps']):.1f} m/s for "
+                f"{int(trigger['consecutive_ticks'])} consecutive ticks"
+            )
         print("Chained phases:")
         for index, phase in enumerate(sequence_config["phases"], start=1):
             print(f"  {index}. {phase['id']}: {phase['instruction']}")
