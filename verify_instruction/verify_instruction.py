@@ -80,6 +80,13 @@ if __name__ != "__main__":
     # Heavy model/CARLA imports are intentionally skipped in the lightweight
     # parent process that launches the evaluator.  This prevents the launcher
     # from creating a second CUDA context on a 24 GB GPU.
+    # The upstream agent historically imports scenario_logger as a top-level
+    # module because its own directory is normally inserted into sys.path by
+    # Leaderboard.  This wrapper lives elsewhere, so provide the legacy alias
+    # explicitly before importing the base agent.
+    from team_code import scenario_logger as _scenario_logger
+
+    sys.modules.setdefault("scenario_logger", _scenario_logger)
     from team_code.agent_simlingo import LingoAgent as _BaseLingoAgent
 
     class InstructionLingoAgent(_BaseLingoAgent):

@@ -128,7 +128,7 @@ export ROUTES="${ROUTES:-$REPO_ROOT/leaderboard/data/bench2drive220.xml}"
 
 PYTHON_TAG="$($PYTHON_BIN -c 'import sys; print(f"py{sys.version_info.major}.{sys.version_info.minor}")')"
 CARLA_EGG="${CARLA_EGG:-$CARLA_ROOT/PythonAPI/carla/dist/carla-0.9.15-${PYTHON_TAG}-linux-x86_64.egg}"
-export PYTHONPATH="$REPO_ROOT:$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$SCENARIO_RUNNER_ROOT:$LEADERBOARD_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/team_code:$CARLA_ROOT/PythonAPI:$CARLA_ROOT/PythonAPI/carla:$SCENARIO_RUNNER_ROOT:$LEADERBOARD_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 if [[ -e "$CARLA_EGG" ]]; then
   export PYTHONPATH="$CARLA_EGG:$PYTHONPATH"
 else
