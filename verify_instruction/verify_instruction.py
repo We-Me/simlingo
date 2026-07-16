@@ -188,6 +188,25 @@ if __name__ != "__main__":
             self._viz_screen.blit(overlay, (0, 0))
             self._pygame.display.flip()
 
+        def destroy(self, results=None):
+            """Release demo resources without assuming optional Hydra keys.
+
+            The upstream destroy() directly reads cfg.data_module.encoder, but
+            that key is absent from the released SimLingo checkpoint config.
+            This verification agent does not need encoder-specific cleanup, so
+            delete only resources that were actually created.
+            """
+
+            self.running = False
+            if getattr(self, "_pygame", None) is not None:
+                self._pygame.quit()
+                self._pygame = None
+                self._viz_screen = None
+
+            for attribute in ("model", "processor", "config"):
+                if hasattr(self, attribute):
+                    delattr(self, attribute)
+
 
 def _load_suite() -> Tuple[Dict[str, dict], Dict[str, str]]:
     with SUITE_PATH.open("r", encoding="utf-8") as handle:
