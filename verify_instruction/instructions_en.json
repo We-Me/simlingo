@@ -1,0 +1,247 @@
+{
+  "suite_name": "SimLingo Basic Track English Instruction Suite",
+  "version": 2,
+  "language": "en",
+  "execution_mode": "with_language_conditioning",
+  "prompt_prefix": "<INSTRUCTION_FOLLOWING>",
+  "prompt_template": "<INSTRUCTION_FOLLOWING> Current speed: {speed_mps} m/s. {navigation_conditioning} {instruction}",
+  "notes": [
+    "Core instructions reproduce the three required basic-track scenarios.",
+    "Robustness instructions add natural paraphrases, vague wording, and related hazards.",
+    "The paired km/h and m/s commands test whether target-speed failures are caused by unit wording.",
+    "Execute only one active instruction at a time unless the instruction explicitly defines an ordered sequence."
+  ],
+  "scenes": [
+    {
+      "scene_id": "S1",
+      "name": "Basic voice-controlled driving",
+      "environment": "Clear daytime, urban arterial road, good visibility, and no dynamic disturbance.",
+      "instructions": [
+        {
+          "id": "S1-01",
+          "priority": "core",
+          "form": "direct",
+          "instruction": "Keep the vehicle in the current lane.",
+          "expected_behavior": "Remain centered in the current lane without an unnecessary lane change."
+        },
+        {
+          "id": "S1-02",
+          "priority": "robustness",
+          "form": "natural_paraphrase",
+          "instruction": "Stay in this lane and keep it steady.",
+          "expected_behavior": "Interpret the vague wording as stable lane keeping."
+        },
+        {
+          "id": "S1-03",
+          "priority": "core",
+          "form": "target_speed_kmh",
+          "instruction": "Accelerate to sixty kilometers per hour.",
+          "expected_behavior": "Increase speed smoothly toward 60 km/h without exceeding the road or safety limit."
+        },
+        {
+          "id": "S1-04",
+          "priority": "diagnostic",
+          "form": "target_speed_mps",
+          "instruction": "Accelerate to 16.7 meters per second.",
+          "expected_behavior": "Produce the same target-speed behavior as S1-03 using SimLingo's native speed unit."
+        },
+        {
+          "id": "S1-05",
+          "priority": "core",
+          "form": "target_speed_kmh",
+          "instruction": "Slow down to forty kilometers per hour.",
+          "expected_behavior": "Reduce speed smoothly toward 40 km/h."
+        },
+        {
+          "id": "S1-06",
+          "priority": "diagnostic",
+          "form": "target_speed_mps",
+          "instruction": "Slow down to 11.1 meters per second.",
+          "expected_behavior": "Produce the same target-speed behavior as S1-05 using SimLingo's native speed unit."
+        },
+        {
+          "id": "S1-07",
+          "priority": "core",
+          "form": "direct",
+          "instruction": "Turn right at the next intersection.",
+          "expected_behavior": "Follow the right-turn branch at the next valid intersection."
+        },
+        {
+          "id": "S1-08",
+          "priority": "robustness",
+          "form": "direct",
+          "instruction": "Turn left at the next intersection.",
+          "expected_behavior": "Follow the left-turn branch at the next valid intersection."
+        },
+        {
+          "id": "S1-09",
+          "priority": "core",
+          "form": "direct",
+          "instruction": "Change to the lane on the left when it is safe.",
+          "expected_behavior": "Check the adjacent lane, complete one left lane change, and stabilize in the new lane."
+        },
+        {
+          "id": "S1-10",
+          "priority": "robustness",
+          "form": "direct",
+          "instruction": "Change to the lane on the right when it is safe.",
+          "expected_behavior": "Check the adjacent lane, complete one right lane change, and stabilize in the new lane."
+        },
+        {
+          "id": "S1-11",
+          "priority": "robustness",
+          "form": "direct",
+          "instruction": "Come to a complete stop.",
+          "expected_behavior": "Decelerate smoothly to a stationary state in a safe location."
+        },
+        {
+          "id": "S1-12",
+          "priority": "robustness",
+          "form": "direct",
+          "instruction": "Continue driving when it is safe.",
+          "expected_behavior": "Resume route following only after the path is clear."
+        }
+      ]
+    },
+    {
+      "scene_id": "S2",
+      "name": "Complex obstacle avoidance",
+      "environment": "Cloudy dusk, low light, urban secondary road, intersections, bus stops, and mixed traffic.",
+      "instructions": [
+        {
+          "id": "S2-01",
+          "priority": "core",
+          "form": "ordered_compound",
+          "instruction": "Yield to the pedestrian crossing the road, then change to the left lane and overtake the slow vehicle when it is safe.",
+          "expected_behavior": "Yield first, wait until the pedestrian is clear, then perform a safe left-lane overtake without omitting a subtask."
+        },
+        {
+          "id": "S2-02",
+          "priority": "robustness",
+          "form": "vague_compound",
+          "instruction": "Let the person cross first, then go around the slow car on the left when you have enough room.",
+          "expected_behavior": "Match the natural paraphrase to the same ordered behavior as S2-01."
+        },
+        {
+          "id": "S2-03",
+          "priority": "core",
+          "form": "ordered_compound",
+          "instruction": "Slow down near the roadside parking area, watch for pedestrians emerging from behind parked vehicles, and continue after confirming that the road is clear.",
+          "expected_behavior": "Reduce speed before the curbside occlusion, yield to any emerging pedestrian, and resume only after checking that the road is clear."
+        },
+        {
+          "id": "S2-04",
+          "priority": "robustness",
+          "form": "vague_compound",
+          "instruction": "Take it easy past the parked cars and move on once no one is stepping into the road.",
+          "expected_behavior": "Infer a cautious pass of the occluded roadside area followed by safe continuation."
+        },
+        {
+          "id": "S2-05",
+          "priority": "robustness",
+          "form": "ordered_compound",
+          "instruction": "Slow down, pass the parked vehicle with a safe gap, and return to the original lane when clear.",
+          "expected_behavior": "Avoid the parked vehicle without collision and recover the original lane."
+        },
+        {
+          "id": "S2-06",
+          "priority": "robustness",
+          "form": "ordered_compound",
+          "instruction": "Wait for the oncoming vehicle to pass, then carefully go around the obstacle.",
+          "expected_behavior": "Do not enter the opposing lane until it is safe, then pass the obstacle."
+        },
+        {
+          "id": "S2-07",
+          "priority": "robustness",
+          "form": "ordered_compound",
+          "instruction": "Keep behind the cyclist for now, then overtake with a safe lateral gap when the opposite lane is clear.",
+          "expected_behavior": "Follow the cyclist safely and delay the overtake until a safe gap exists."
+        },
+        {
+          "id": "S2-08",
+          "priority": "robustness",
+          "form": "situational",
+          "instruction": "Do not enter the intersection until there is enough space to clear it completely.",
+          "expected_behavior": "Avoid blocking the intersection and proceed only when the exit is clear."
+        }
+      ]
+    },
+    {
+      "scene_id": "S3",
+      "name": "Extreme emergency response",
+      "environment": "Rainy night, poor visibility, reflective pavement, urban expressway, construction, lane narrowing, and sudden dynamic hazards.",
+      "instructions": [
+        {
+          "id": "S3-01",
+          "priority": "core",
+          "form": "vague_emergency",
+          "instruction": "There is danger ahead. Keep us at a safe speed and be ready to stop.",
+          "expected_behavior": "Infer the hazard, reduce speed conservatively, increase safety margin, and prepare to stop."
+        },
+        {
+          "id": "S3-02",
+          "priority": "core",
+          "form": "emergency",
+          "instruction": "That vehicle is cutting in. Brake now and keep a safe distance.",
+          "expected_behavior": "Respond immediately with controlled braking and collision avoidance."
+        },
+        {
+          "id": "S3-03",
+          "priority": "core",
+          "form": "ordered_compound",
+          "instruction": "Slow down for the construction zone and merge into the left lane when there is a safe gap.",
+          "expected_behavior": "Reduce speed before the narrowed section and complete a safe left merge."
+        },
+        {
+          "id": "S3-04",
+          "priority": "robustness",
+          "form": "vague_compound",
+          "instruction": "The lane is closing ahead. Ease off and move over when you find enough room.",
+          "expected_behavior": "Infer lane narrowing, slow down, select a valid adjacent lane, and merge safely."
+        },
+        {
+          "id": "S3-05",
+          "priority": "robustness",
+          "form": "situational",
+          "instruction": "Visibility is poor. Reduce speed and leave more space behind the vehicle ahead.",
+          "expected_behavior": "Adopt a lower safe speed and increase following distance in rain and darkness."
+        },
+        {
+          "id": "S3-06",
+          "priority": "robustness",
+          "form": "emergency",
+          "instruction": "Emergency stop now.",
+          "expected_behavior": "Apply prompt controlled emergency braking while maintaining stability."
+        },
+        {
+          "id": "S3-07",
+          "priority": "robustness",
+          "form": "emergency",
+          "instruction": "The vehicle ahead has stopped suddenly. Brake hard and avoid a collision.",
+          "expected_behavior": "Perform immediate collision-avoidance braking without an unsafe lane departure."
+        },
+        {
+          "id": "S3-08",
+          "priority": "robustness",
+          "form": "situational",
+          "instruction": "Make way for the emergency vehicle and stop in a safe place if necessary.",
+          "expected_behavior": "Yield without blocking traffic and stop only where safe."
+        },
+        {
+          "id": "S3-09",
+          "priority": "robustness",
+          "form": "emergency",
+          "instruction": "Watch the opening door. Slow down and move away from it safely.",
+          "expected_behavior": "Avoid the opening-door hazard with braking and safe lateral clearance."
+        },
+        {
+          "id": "S3-10",
+          "priority": "robustness",
+          "form": "emergency",
+          "instruction": "A pedestrian is entering the road. Brake immediately and let them pass.",
+          "expected_behavior": "Stop or slow sufficiently before the conflict point and yield to the pedestrian."
+        }
+      ]
+    }
+  ]
+}
