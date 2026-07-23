@@ -33,16 +33,24 @@ class AutonomousAgent(object):
     """
 
     def __init__(self, path_to_conf_file, route_index=None):
+        # Evaluator 调用 self.agent_instance = agent_class_obj(args.agent_config, config.index) 实际创建的是 DataAgent
+        # 继承关系 DataAgent → AutoPilot → AutonomousAgentLocal
+        # 前两者没有定义 __init__()，所以最终进入这里
+
+        # 给 Agent 设置一个默认 Track
+        # 之后会覆盖为 autonomous_agent.Track.MAP
+        # 这里使用 autonomous_agent 的估计是为了对齐框架
         self.track = Track.SENSORS
         #  current global plans to reach a destination
-        self._global_plan = None
-        self._global_plan_world_coord = None
+        self._global_plan = None                    # 为 GPS 坐标路线表示预留变量
+        self._global_plan_world_coord = None        # 为 CARLA 世界坐标路线表示预留变量
 
         # this data structure will contain all sensor data
-        self.sensor_interface = SensorInterface()
+        self.sensor_interface = SensorInterface()   # 创建 Agent 自己的传感器数据接口
 
-        self.wallclock_t0 = None
+        self.wallclock_t0 = None                    # 保存 Agent 第一次运行时的现实时间起点
 
+    # override
     def setup(self, path_to_conf_file):
         """
         Initialize everything needed by your agent and set the track attribute to the right type:
@@ -51,6 +59,7 @@ class AutonomousAgent(object):
         """
         pass
 
+    # override
     def sensors(self):  # pylint: disable=no-self-use
         """
         Define the sensor suite required by the agent
@@ -73,6 +82,7 @@ class AutonomousAgent(object):
 
         return sensors
 
+    # override
     def run_step(self, input_data, timestamp):
         """
         Execute one step of navigation.
@@ -86,6 +96,7 @@ class AutonomousAgent(object):
 
         return control
 
+    # override
     def destroy(self):
         """
         Destroy (clean-up) the agent
@@ -124,8 +135,21 @@ class AutonomousAgent(object):
         """
         Set the plan (route) for the agent
         """
-        self.org_dense_route_gps = global_plan_gps
-        self.org_dense_route_world_coord = global_plan_world_coord
-        ds_ids = downsample_route(global_plan_world_coord, 200)
-        self._global_plan_world_coord = [(global_plan_world_coord[x][0], global_plan_world_coord[x][1]) for x in ds_ids]
+        # 两个参数表示同一条路线，只是坐标系不同
+        self.org_dense_route_gps = global_plan_gps                      # 保存完整的稠密 GPS 路线
+        self.org_dense_route_world_coord = global_plan_world_coord      # 保存完整的 CARLA 世界坐标路线
+
+        ds_ids = downsample_route(global_plan_world_coord, 200)         # 对完整路线降采样
+
+        # 按照 ds_ids 从稠密世界坐标路线中选点
+        self._global_plan_world_coord = [
+            (
+                global_plan_world_coord[x][0], 
+                global_plan_world_coord[x][1]
+            )
+            for x in ds_ids
+        ]
+        # 使用同一组索引，对 GPS 路线降采样
+        # 确保 _global_plan_world_coord 和 _global_plan 路径点一致
         self._global_plan = [global_plan_gps[x] for x in ds_ids]
+        

@@ -47,86 +47,111 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
             traffic_manager (object, optional): The traffic manager object.
 
         """
-    self.recording = False
-    self.track = autonomous_agent.Track.MAP
-    self.config_path = path_to_conf_file
-    self.step = -1
-    self.initialized = False
-    self.save_path = None
-    self.route_index = route_index
+    self.recording = False                                  # CARLA recorder 当前未启动
+    self.track = autonomous_agent.Track.MAP                 # 声明 Agent 使用 MAP track
+    self.config_path = path_to_conf_file                    # 保存配置路径
+    self.step = -1                                          # 主帧计数器从 -1 开始，第一帧会满足保存条件
+    self.initialized = False                                # 表示依赖 CARLA world、ego vehicle 和 route 的延迟初始化尚未进行
+    self.save_path = None                                   # 只有环境变量 SAVE_PATH 存在时，稍后才会创建保存目录
+    self.route_index = route_index                          # 保存外部传入的路线标识，当前外部传入的是 route_date_string
 
-    self.datagen = int(os.environ.get("DATAGEN", 0)) == 1
+    self.datagen = int(os.environ.get("DATAGEN", 0)) == 1   # 数据采集开关
 
-    self.config = GlobalConfig()
+    self.config = GlobalConfig()                            # 创建全局默认配置
 
-    self.speed_histogram = []
-    self.make_histogram = int(os.environ.get("HISTOGRAM", 0))
+    self.speed_histogram = []                               # 用于可选的目标速度统计
+    self.make_histogram = \
+      int(os.environ.get("HISTOGRAM", 0))
 
-    self.tp_stats = False
+    self.tp_stats = False                                   # 初始化 target-point 方向一致性统计
     self.tp_sign_agrees_with_angle = []
     if int(os.environ.get("TP_STATS", 0)):
       self.tp_stats = True
 
     # Dynamics models
-    self.ego_model = KinematicBicycleModel(self.config)
-    self.vehicle_model = KinematicBicycleModel(self.config)
+    # 主要服务于专家驾驶的碰撞预测和刹车决策
+    self.ego_model = KinematicBicycleModel(self.config)     # 预测 ego 未来状态
+    self.vehicle_model = KinematicBicycleModel(self.config) # 预测其他车辆未来状态
 
     # Configuration
-    self.visualize = int(os.environ.get("DEBUG_CHALLENGE", 0))
+    self.visualize = \
+      int(os.environ.get("DEBUG_CHALLENGE", 0))             # 控制调试可视化，不等于数据采集开关
 
+    # 初始化行人和停止标志相关状态。这些状态之后可能写入 measurement
     self.walker_close = False
     self.distance_to_walker = np.inf
     self.stop_sign_close = False
     self.waiting_ticks_at_stop_sign = 0
 
     # To avoid failing the ActorBlockedTest, the agent has to move at least 0.1 m/s every 179 ticks
+    # 记录 ego 连续低速的帧数。专家驾驶会在车辆长时间阻塞后强制给油，避免触发 ActorBlockedTest
     self.ego_blocked_for_ticks = 0
 
     # Controllers
+    # 创建转向控制器，之后根据路线、当前朝向和速度生成 steer 标签
     self._turn_controller = LateralPIDController(self.config)
 
+    # 交通灯缓存
     self.list_traffic_lights = []
 
     # Navigation command buffer, needed because the correct command comes from the last cleared waypoint
+    # 保存最近两个导航 command
     self.commands = deque(maxlen=2)
+    # 初始值 4 通常表示 LANEFOLLOW
     self.commands.append(4)
     self.commands.append(4)
+    # 同样初始化下一导航命令的缓冲区
     self.next_commands = deque(maxlen=2)
     self.next_commands.append(4)
     self.next_commands.append(4)
+    # 用一个不可能出现的远距离坐标作为初值
     self.target_point_prev = [1e5, 1e5, 1e5]
 
     # Initialize controls
+    # 控制量初值
     self.steer = 0.0
     self.throttle = 0.0
     self.brake = 0.0
 
+    # 初始化增强相机位姿
     self.augmentation_translation = 0
     self.augmentation_rotation = 0
 
     # Angle to the next waypoint, normalized in [-1, 1] corresponding to [-90, 90]
+    # 表示当前位置到目标 waypoint 的归一化角度
     self.angle = 0.0
+    # 初始化不同类型的危险标记
     self.stop_sign_hazard = False
     self.traffic_light_hazard = False
     self.walker_hazard = False
     self.vehicle_hazard = False
+    # 当前是否处于路口
     self.junction = False
+    # 专家横向控制器瞄准的 waypoint
     self.aim_wp = None  # Waypoint the expert is steering towards
+    # 专家可能修改过的剩余路线
     self.remaining_route = None  # Remaining route
+    # 最初未修改的原始路线
     self.remaining_route_original = None  # Remaining original route
+    # 保存附近交通灯和停止标志
     self.close_traffic_lights = []
     self.close_stop_signs = []
+    # 维护停车标志状态机
     self.was_at_stop_sign = False
     self.cleared_stop_sign = False
+    # 维护行人可见性以及上一帧位置，用于行人轨迹和危险判断
     self.visible_walker_ids = []
     self.walker_past_pos = {}  # Position of walker in the last frame
 
+    # 把位置灯和近光灯按位组合
     self._vehicle_lights = carla.VehicleLightState.Position | carla.VehicleLightState.LowBeam
 
     # Get the world map and the ego vehicle
+    # 从全局数据提供器取得 CARLA map
     self.world_map = CarlaDataProvider.get_map()
 
     # Set up the save path if specified
+    # 创建保存根目录
     if os.environ.get("SAVE_PATH", None) is not None:
       string = os.environ["TOWN"]
       string += "_Rep" + os.environ["REPETITION"]
@@ -135,9 +160,11 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
       self.save_path = pathlib.Path(os.environ["SAVE_PATH"]) / string
       self.save_path.mkdir(parents=True, exist_ok=False)
 
+      # 只有 DATAGEN=1 才创建 measurement 目录
       if self.datagen:
         (self.save_path / "measurements").mkdir()
 
+      # 创建场景日志记录器
       self.lon_logger = ScenarioLogger(
           save_path=self.save_path,
           route_index=route_index,
@@ -184,50 +211,70 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
         Args:
             hd_map (carla.Map): The map object of the CARLA world.
         """
+    # 输出稀疏和稠密路线长度，用于检查 set_global_plan() 是否正确执行
     print("Sparse Waypoints:", len(self._global_plan))
     print("Dense Waypoints:", len(self.org_dense_route_world_coord))
 
     # Get the hero vehicle and the CARLA world
-    self._vehicle = CarlaDataProvider.get_hero_actor()
-    self._world = self._vehicle.get_world()
+    self._vehicle = CarlaDataProvider.get_hero_actor()  # 取得 ego vehicle
+    self._world = self._vehicle.get_world()             # 通过 ego actor 取得当前 CARLA world
 
     # Check if the vehicle starts from a parking spot
+    # 计算稠密路线第一个 waypoint 与车辆实际起点的距离
     distance_to_road = self.org_dense_route_world_coord[0][0].location.distance(self._vehicle.get_location())
     # The first waypoint starts at the lane center, hence it's more than 2 m away from the center of the
     # ego vehicle at the beginning.
+    # 距离大于 2 米时，认为车辆从停车位起步，需要 route planner 特殊处理驶出停车位的阶段
     starts_with_parking_exit = distance_to_road > 2
 
     # Set up the route planner and extrapolation
+    # 创建 privileged route planner
     self._waypoint_planner = PrivilegedRoutePlanner(self.config)
-    self._waypoint_planner.setup_route(self.org_dense_route_world_coord, self._world, self.world_map,
-                                       starts_with_parking_exit, self._vehicle.get_location())
-    self._waypoint_planner.save()
+    self._waypoint_planner.setup_route(
+      self.org_dense_route_world_coord, # 完整稠密路线
+      self._world,                      # CARLA world
+      self.world_map,                   # CARLA map
+      starts_with_parking_exit,         # 是否从停车位驶出
+      self._vehicle.get_location()      # ego 当前真实位置
+    )
+    self._waypoint_planner.save()       # 保存规划器当前内部状态
 
     # Set up the longitudinal controller and command planner
+    # 创建纵向控制器，根据当前速度、目标速度、是否需要刹车输出 throttle 和 controller brake
     self._longitudinal_controller = LongitudinalLinearRegressionController(self.config)
+
+    # 创建高层 command planner
     self._command_planner = RoutePlanner(self.config.route_planner_min_distance, self.config.route_planner_max_distance)
+    # 这里使用稀疏世界坐标路线，而不是前面的完整稠密路线
     self._command_planner.set_route(self._global_plan_world_coord)
 
     # Set up logging
     if self.save_path is not None:
+      # 把实际 ego vehicle 和 world 绑定到 ScenarioLogger
       self.lon_logger.ego_vehicle = self._vehicle
       self.lon_logger.world = self._world
 
     # Preprocess traffic lights
+    # 一次性获取当前 world 中所有 actor
     all_actors = self._world.get_actors()
     for actor in all_actors:
       if "traffic_light" in actor.type_id:
+        # 预计算交通灯触发区域中心和受该交通灯控制的 lane waypoints
         center, waypoints = t_u.get_traffic_light_waypoints(actor, self.world_map)
+        # 缓存起来，避免每帧重新解析交通灯触发区域
         self.list_traffic_lights.append((actor, center, waypoints))
 
     # Remove bugged 2-wheelers
     # https://github.com/carla-simulator/carla/issues/3670
     for actor in all_actors:
       if "vehicle" in actor.type_id:
+        # 取得 bounding box 半长、半宽、半高
         extent = actor.bounding_box.extent
+        # 删除 bounding box 尺寸异常的车辆，主要规避 CARLA 两轮车 bug
         if extent.x < 0.001 or extent.y < 0.001 or extent.z < 0.001:
           actor.destroy()
 
+    # 表示组件已经初始化完成
     self.initialized = True
 
   def sensors(self):
@@ -242,10 +289,10 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
         """
     sensor_specs = [{
         "type": "sensor.opendrive_map",
-        "reading_frequency": 1e-6,
+        "reading_frequency": 1e-6,        # 1e-6 表示极低读取频率，因为地图基本不变化，通常只需要初始数据
         "id": "hd_map"
     }, {
-        "type": "sensor.other.imu",
+        "type": "sensor.other.imu",       # 安装在 ego 原点，没有额外旋转，sensor_tick=0.05，即 20 Hz
         "x": 0.0,
         "y": 0.0,
         "z": 0.0,
@@ -255,7 +302,7 @@ class AutoPilot(autonomous_agent_local.AutonomousAgent):
         "sensor_tick": 0.05,
         "id": "imu"
     }, {
-        "type": "sensor.speedometer",
+        "type": "sensor.speedometer",     # 最后加入 speedomete
         "reading_frequency": 20,
         "id": "speed"
     }]

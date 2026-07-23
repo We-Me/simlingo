@@ -25,13 +25,14 @@ from agents.tools.misc import (is_within_distance, get_trafficlight_trigger_loca
 
 from agents.navigation.local_planner import LocalPlanner
 
-
 # from: https://medium.com/codex/rgb-to-color-names-in-python-the-robust-way-ec4a9d97a01f
 from scipy.spatial import KDTree
 from webcolors import (
     CSS2_HEX_TO_NAMES,
     hex_to_rgb,
 )
+
+
 def convert_rgb_to_names(rgb_tuple):
     
     # a dictionary of all the hex and their respective names in css3
@@ -57,18 +58,30 @@ class DataAgent(AutoPilot):
                 """
 
     def setup(self, path_to_conf_file, route_index=None, traffic_manager=None):
-        super().setup(path_to_conf_file, route_index, traffic_manager=None)
+        # AutoPilot.setup()
+        super().setup(
+            path_to_conf_file,          # agent/scenario 配置路径
+            route_index,                # 当前代码中实际接收 route_date_string
+            traffic_manager=None        # Evaluator 创建的 CARLA Traffic Manager
+        )
 
+        # 控制是否额外保存 TransFuser 风格标签
         self.SAVE_TF_LABELS = int(os.environ.get('SAVE_TF_LABELS', 0))
 
+        # 用于缓存随机天气。不过当前主链没有启用 shuffle_weather()
         self.weather_tmp = None
+        # 额外的帧计数器
         self.step_tmp = 0
 
+        # 保存真正的 Traffic Manager
         self.tm = traffic_manager
 
+        # 从配置路径的父目录取得场景名称
         self.scenario_name = Path(path_to_conf_file).parent.name
+        # 用于记录 cut-in 车辆的起始位置
         self.cutin_vehicle_starting_position = None
 
+        # 只有同时满足以下条件才创建传感器目录
         if self.save_path is not None and self.datagen:
             (self.save_path / 'lidar').mkdir()
             (self.save_path / 'rgb').mkdir()
@@ -82,9 +95,12 @@ class DataAgent(AutoPilot):
                 (self.save_path / 'bev_semantics').mkdir()
                 (self.save_path / 'bev_semantics_augmented').mkdir()
 
+        # 临时可视化开关
         self.tmp_visu = int(os.environ.get('TMP_VISU', 0))
 
+        # 初始化当前活动交通灯
         self._active_traffic_light = None
+        # 缓存上一帧 LiDAR 和 ego 位姿
         self.last_lidar = None
         self.last_ego_transform = None
 
@@ -93,6 +109,7 @@ class DataAgent(AutoPilot):
         # if self.datagen:
         #     self.shuffle_weather()
 
+        # 这是 BEV semantic manager 的配置
         obs_config = {
                 'width_in_pixels': self.config.lidar_resolution_width,
                 'pixels_ev_to_bottom': self.config.lidar_resolution_height / 2.0,
@@ -103,35 +120,47 @@ class DataAgent(AutoPilot):
                 'map_folder': 'maps_2ppm_cv'
         }
 
+        # 创建停止标志运行状态判定器，用来判断车辆是否正确经过 stop sign
         self.stop_sign_criteria = RunStopSign(self._world)
+        # 创建普通相机/普通 ego 位姿对应的 BEV semantic manager
         self.ss_bev_manager = ObsManager(obs_config, self.config)
+        # 将真实 ego vehicle 和 stop-sign 判定器绑定到普通 BEV manager
         self.ss_bev_manager.attach_ego_vehicle(self._vehicle, criteria_stop=self.stop_sign_criteria)
 
+        # 创建增强相机对应的第二个 BEV manager
+        # 但增强相机相对于 ego 有偏移，不能直接绑定真实 ego，否则增强 RGB 与增强 BEV 的坐标会不一致
         self.ss_bev_manager_augmented = ObsManager(obs_config, self.config)
 
+        # 复制 ego bounding box
         bb_copy = carla.BoundingBox(self._vehicle.bounding_box.location, self._vehicle.bounding_box.extent)
+        # 复制 ego 当前 transform
         transform_copy = carla.Transform(self._vehicle.get_transform().location, self._vehicle.get_transform().rotation)
         # Can't clone the carla vehicle object, so I use a dummy class with similar attributes.
-        self.augmented_vehicle_dummy = t_u.CarlaActorDummy(self._vehicle.get_world(), bb_copy, transform_copy,
-                                                                                                             self._vehicle.id)
-        self.ss_bev_manager_augmented.attach_ego_vehicle(self.augmented_vehicle_dummy,
-                                                                                                         criteria_stop=self.stop_sign_criteria)
-
+        # 创建一个表现得像 CARLA actor 的虚拟对象
+        self.augmented_vehicle_dummy = t_u.CarlaActorDummy(self._vehicle.get_world(), bb_copy, transform_copy, self._vehicle.id)
+        # 把虚拟 ego 绑定到增强 BEV manager
+        self.ss_bev_manager_augmented.attach_ego_vehicle(self.augmented_vehicle_dummy, criteria_stop=self.stop_sign_criteria)
+        # 创建 CARLA LocalPlanner
         self._local_planner = LocalPlanner(self._vehicle, opt_dict={}, map_inst=self.world_map)
 
     def sensors(self):
         # workaraound that only does data augmentation at the beginning of the route
+        # 生成增强相机位姿
         if self.config.augment:
-            self.augmentation_translation = np.random.uniform(low=self.config.camera_translation_augmentation_min,
-                                                                                                                high=self.config.camera_translation_augmentation_max)
-            self.augmentation_rotation = np.random.uniform(low=self.config.camera_rotation_augmentation_min,
-                                                                                                         high=self.config.camera_rotation_augmentation_max)
+            self.augmentation_translation = np.random.uniform(
+                low=self.config.camera_translation_augmentation_min,
+                high=self.config.camera_translation_augmentation_max
+            )
+            self.augmentation_rotation = np.random.uniform(
+                low=self.config.camera_rotation_augmentation_min,
+                high=self.config.camera_rotation_augmentation_max
+            )
 
         result = super().sensors()
 
         if self.save_path is not None and (self.datagen or self.tmp_visu):
             result += [{
-                    'type': 'sensor.camera.rgb',
+                    'type': 'sensor.camera.rgb',        # 创建 RGB 相机
                     'x': self.config.camera_pos[0],
                     'y': self.config.camera_pos[1],
                     'z': self.config.camera_pos[2],
@@ -143,7 +172,7 @@ class DataAgent(AutoPilot):
                     'fov': self.config.camera_fov,
                     'id': 'rgb'
             }, {
-                    'type': 'sensor.camera.rgb',
+                    'type': 'sensor.camera.rgb',        # 创建增强 RGB 相机
                     'x': self.config.camera_pos[0],
                     'y': self.config.camera_pos[1] + self.augmentation_translation,
                     'z': self.config.camera_pos[2],
@@ -157,7 +186,7 @@ class DataAgent(AutoPilot):
             }]
 
         result.append({
-                'type': 'sensor.lidar.ray_cast',
+                'type': 'sensor.lidar.ray_cast',        # 无条件追加 LiDAR
                 'x': self.config.lidar_pos[0],
                 'y': self.config.lidar_pos[1],
                 'z': self.config.lidar_pos[2],
@@ -169,7 +198,7 @@ class DataAgent(AutoPilot):
                 'id': 'lidar'
         })
 
-        if self.SAVE_TF_LABELS:
+        if self.SAVE_TF_LABELS:                         # 开启额外标签时才创建
             result.append(
                 {
                         'type': 'sensor.camera.semantic_segmentation',
@@ -221,8 +250,6 @@ class DataAgent(AutoPilot):
                         'id': 'depth_augmented'
                 }
             )
-
-
 
         return result
 
