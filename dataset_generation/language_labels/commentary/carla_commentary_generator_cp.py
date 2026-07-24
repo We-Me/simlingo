@@ -27,6 +27,332 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 _ACTIVE_CAMERA_VIEWS = ()
 
 
+COLOR_NAMES_ZH = {
+    "black": "黑色",
+    "blue": "蓝色",
+    "dark blue": "深蓝色",
+    "gray": "灰色",
+    "grey": "灰色",
+    "green": "绿色",
+    "dark green": "深绿色",
+    "maroon": "深红色",
+    "navy": "深蓝色",
+    "olive": "橄榄绿色",
+    "orange": "橙色",
+    "red": "红色",
+    "white": "白色",
+    "yellow": "黄色",
+}
+
+
+def _vehicle_type_zh(object_box):
+    type_id = object_box.get("type_id", "")
+    if "firetruck" in type_id:
+        return "消防车"
+    if "police" in type_id:
+        return "警车"
+    if "ambulance" in type_id:
+        return "救护车"
+    if "jeep" in type_id:
+        return "吉普车"
+    if "micro" in type_id:
+        return "小型车辆"
+    if "nissan.patrol" in type_id:
+        return "运动型多用途车"
+    if "european_hgv" in type_id:
+        return "重型货车"
+    if "sprinter" in type_id:
+        return "厢式货车"
+
+    base_type = object_box.get("base_type", "vehicle")
+    return {
+        "bicycle": "自行车",
+        "bus": "公交车",
+        "car": "轿车",
+        "motorcycle": "摩托车",
+        "truck": "卡车",
+        "van": "厢式货车",
+        "vehicle": "车辆",
+    }.get(base_type, "车辆")
+
+
+def get_object_appearance_zh(object_box, english_appearance=""):
+    """Describe the cause object in natural Chinese word order."""
+
+    if object_box is None:
+        return {
+            "construction site": "前方施工区域",
+            "red traffic light": "前方红灯",
+            "stop sign": "前方停车标志",
+            "traffic light": "前方交通信号灯",
+            "vehicle": "前方车辆",
+            "walker": "前方行人",
+        }.get(english_appearance, "前方目标")
+
+    object_class = object_box.get("class")
+    if object_class == "traffic_light":
+        state = str(object_box.get("state", "")).lower()
+        state_zh = {"green": "绿灯", "red": "红灯", "yellow": "黄灯"}.get(
+            state, "交通信号灯"
+        )
+        return f"前方{state_zh}"
+    if object_class == "stop_sign":
+        return "前方停车标志"
+    if object_class == "static":
+        return "前方施工区域"
+    if object_class == "walker":
+        return "前方儿童" if object_box.get("age") == "child" else "前方行人"
+    if object_class != "car":
+        return "前方目标"
+
+    lateral_position = float(object_box.get("position", [0.0, 0.0])[1])
+    if lateral_position > 2.0:
+        direction = "右前方"
+    elif lateral_position < -2.0:
+        direction = "左前方"
+    else:
+        direction = "前方"
+
+    color_name = str(object_box.get("color_name") or "").lower()
+    color = COLOR_NAMES_ZH.get(color_name, "")
+    color_rgb = object_box.get("color_rgb")
+    if color_rgb in ([0, 28, 0], [12, 42, 12], [0, 21, 0]):
+        color = "深绿色"
+    elif color_rgb == [0, 12, 58]:
+        color = "深蓝色"
+    elif color_rgb == [211, 142, 0]:
+        color = "黄色"
+    elif color_rgb == [145, 255, 181]:
+        color = "蓝色"
+    elif color_rgb == [215, 88, 0]:
+        color = "橙色"
+
+    return f"{direction}的{color}{_vehicle_type_zh(object_box)}"
+
+
+def _strip_sentence(text):
+    return text.strip().rstrip(".").strip()
+
+
+def _pick_template(templates_zh, key):
+    return random.choice(templates_zh[key])
+
+
+def _translate_route_action(route_action, templates_zh):
+    route_action = _strip_sentence(route_action)
+    direct = {
+        "": "",
+        "Do a lane change": "执行变道。",
+        "Exit the parking lot": "驶出停车区域。",
+        "Follow the route": "沿规划路线行驶。",
+        "Prepare to do a lane change": "准备变道。",
+        "Turn left": "在前方路口左转。",
+        "Turn right": "在前方路口右转。",
+    }
+    if route_action in direct:
+        return direct[route_action]
+
+    scenario_actions = {
+        "steer clear of the parked vehicle": _pick_template(templates_zh, "ParkedObstacle"),
+        "overtake the bikes on your lane": _pick_template(templates_zh, "HazardAtSideLane"),
+        "avoid the vehicle that is opening its door": _pick_template(templates_zh, "VehicleOpensDoor"),
+        "give way to the emergency vehicle": _pick_template(templates_zh, "YieldToEmergencyVehicle"),
+        "avoid the accident on your lane": _pick_template(templates_zh, "Accident"),
+        "go around the construction site": _pick_template(templates_zh, "ConstructionObstacle"),
+        "steer clear of the oncoming traffic entering your lane due to the construction cones": _pick_template(templates_zh, "InvadingTurn"),
+        "avoid the oncoming traffic that is invading your lane": _pick_template(templates_zh, "InvadingTurnOLD"),
+    }
+    lowered = route_action.lower()
+    if lowered in scenario_actions:
+        return scenario_actions[lowered]
+
+    if lowered.startswith("prepare to "):
+        action = scenario_actions.get(lowered[len("prepare to ") :])
+        if action:
+            return f"准备{action.rstrip('。')}。"
+
+    stay_match = re.fullmatch(r"stay on (.+?) to (.+)", lowered)
+    if stay_match:
+        lane_en, action_en = stay_match.groups()
+        lane_zh = {
+            "neighbouring lane": "相邻车道",
+            "your current lane": "当前车道",
+            "your current (oncoming) lane": "当前对向车道",
+        }.get(lane_en, "当前车道")
+        action_zh = scenario_actions.get(action_en)
+        if action_zh:
+            return f"继续沿{lane_zh}行驶，并{action_zh.rstrip('。')}。"
+
+    if "make space for the traffic that invades the lane" in lowered:
+        return f"{_pick_template(templates_zh, 'shift_right')}，为进入本车道的对向车辆留出空间。"
+    if lowered.startswith("return to your original route"):
+        return _pick_template(templates_zh, "go_back")
+
+    # Unknown route-specific English should never leak into the Chinese label.
+    return "沿规划路线行驶。"
+
+
+def _distance_suffix(distance_value):
+    if distance_value is None:
+        return ""
+    return f"，当前相距{distance_value}米"
+
+
+def _translate_reason(reason, object_zh, distance_value, templates_zh):
+    reason = _strip_sentence(reason)
+    lowered = reason.lower()
+    distance_suffix = _distance_suffix(distance_value)
+
+    if not lowered:
+        return ""
+    if (
+        "you cleared the stop sign" in lowered
+        or "you cleared <object>" in lowered
+    ):
+        result = f"，因为{_pick_template(templates_zh, 'cleared_stop')}"
+        if "junction is clear" in lowered:
+            result += "，且路口已经畅通"
+        elif "vehicle in the junction is moving away" in lowered:
+            result += "，且路口内的车辆正在驶离"
+        elif "pay attention to" in lowered:
+            result += "，同时注意驶向路口的车辆"
+        return result
+    if "avoid a collision with" in lowered or "prevent a crash with" in lowered:
+        phrase = _pick_template(templates_zh, "prevent_collision")
+        return f"，{phrase.replace('<OBJECT>', object_zh)}"
+    if "intersecting your path" in lowered or "crossing in front of you" in lowered:
+        phrase = _pick_template(templates_zh, "cross_path")
+        return f"，{phrase.replace('<OBJECT>', object_zh)}{distance_suffix}"
+    if "that is crossing the road" in lowered:
+        return f"，注意避让{object_zh}，该目标正在横穿道路{distance_suffix}"
+    if "stopped because of a red traffic light" in lowered:
+        return f"，与{object_zh}保持安全距离，该车正因红灯停车{distance_suffix}"
+    if "slowing down because of a red traffic light" in lowered:
+        return f"，跟随{object_zh}，该车正因红灯减速{distance_suffix}"
+    if "drive closer to the stationary" in lowered:
+        return f"，逐步靠近{object_zh}，该目标当前静止{distance_suffix}"
+    if "to follow the" in lowered or "to follow <object>" in lowered:
+        return f"，跟随{object_zh}{distance_suffix}"
+    if "stay behind" in lowered:
+        phrase = _pick_template(templates_zh, "stay_behind")
+        return f"，{phrase.replace('<OBJECT>', object_zh)}{distance_suffix}"
+    if "drive closer to" in lowered:
+        phrase = _pick_template(templates_zh, "drive_closer")
+        return f"，{phrase.replace('<OBJECT>', object_zh)}{distance_suffix}"
+    if "reach the speed limit" in lowered:
+        return "，逐步达到道路限速"
+    if "drive according to the speed limit" in lowered:
+        return "，按照道路限速行驶"
+    if lowered.startswith("due to the") or lowered.startswith("due to <object>"):
+        return f"，受{object_zh}影响{distance_suffix}"
+    if "traffic light is green" in lowered:
+        result = "，当前信号灯为绿灯"
+        if "junction is clear" in lowered:
+            result += "，且路口已经畅通"
+        elif "pay attention" in lowered:
+            result += "，但仍需注意驶向路口的车辆"
+        return result
+    if "drive through the junction" in lowered:
+        result = "，安全通过当前路口"
+        if "junction is clear" in lowered:
+            result += "，路口当前畅通"
+        elif "pay attention" in lowered:
+            result += "，同时注意路口内及驶向路口的车辆"
+        return result
+    if "drive with the target speed" in lowered:
+        return "，逐步达到目标车速"
+    if "change to the neighbouring lane" in lowered:
+        return f"，变入相邻车道，{_pick_template(templates_zh, 'gap_big')}"
+    if "change to the oncoming lane" in lowered:
+        return f"，变入对向车道，{_pick_template(templates_zh, 'gap_big')}"
+    if "junction is clear" in lowered:
+        return "，确认路口畅通后继续行驶"
+    if "vehicle in the junction is moving away" in lowered:
+        return "，确认路口内车辆正在驶离后继续行驶"
+    if "pay attention to the vehicle" in lowered:
+        return "，注意路口内及驶向路口的车辆"
+    if object_zh:
+        return f"，注意{object_zh}并根据路况调整车速{distance_suffix}"
+    return "，根据当前道路状况调整车速"
+
+
+def translate_commentary_zh(
+    commentary, english_object, object_zh, templates_zh
+):
+    """Reassemble original Commentary semantics in Chinese word order."""
+
+    text = commentary.strip()
+    attention_en = "Pay attention to the walker and brake if necessary."
+    has_walker_attention = attention_en in text
+    text = text.replace(attention_en, "")
+
+    pedestrian_exit_attention = (
+        "Pay attention to the pedestrian on the exit of the junction."
+    )
+    has_exit_attention = pedestrian_exit_attention in text
+    text = text.replace(pedestrian_exit_attention, "")
+
+    if english_object:
+        text = text.replace(f"the {english_object}", "<OBJECT>")
+        text = text.replace(english_object, "<OBJECT>")
+    text = text.replace("a vehicle", "<OBJECT>")
+
+    distance_values = []
+
+    def replace_distance(match):
+        distance_values.append(match.group(1))
+        return "<DISTANCE>"
+
+    text = re.sub(
+        r"\b(?:in|at) (-?\d+(?:\.\d+)?) meters\b",
+        replace_distance,
+        text,
+    )
+    distance_value = distance_values[0] if distance_values else None
+
+    speed_actions = (
+        ("Maintain the reduced speed", "maintain_reduced_speed"),
+        ("Maintain your current speed", "maintain_speed"),
+        ("Remain stopped", "remain_stopped"),
+        ("Stop now", "stop_now"),
+        ("Accelerate", "accelerate"),
+        ("Decelerate", "decelerate"),
+        ("Wait for a gap in the traffic before changing lanes", "wait_gap"),
+    )
+    matches = [
+        (text.find(phrase), phrase, key)
+        for phrase, key in speed_actions
+        if text.find(phrase) >= 0
+    ]
+    if not matches:
+        route_zh = _translate_route_action(text, templates_zh)
+        speed_sentence = ""
+    else:
+        action_index, action_phrase, action_key = min(matches, key=lambda item: item[0])
+        route_en = text[:action_index].strip()
+        reason_en = text[action_index + len(action_phrase) :].strip()
+        route_zh = _translate_route_action(route_en, templates_zh)
+
+        if action_key == "wait_gap":
+            speed_text = _pick_template(templates_zh, action_key)
+            if "lane with oncoming traffic" in reason_en.lower():
+                speed_text += "，并变入对向车道"
+            speed_sentence = f"{speed_text}。"
+        else:
+            reason_zh = _translate_reason(
+                reason_en, object_zh, distance_value, templates_zh
+            )
+            speed_sentence = f"{_pick_template(templates_zh, action_key)}{reason_zh}。"
+
+    parts = [part for part in (route_zh, speed_sentence) if part]
+    if has_exit_attention:
+        parts.append("通过路口时注意出口附近的行人。")
+    if has_walker_attention:
+        parts.append("注意行人动态，必要时制动。")
+    result = "".join(parts)
+    return result.replace("。。", "。").replace("，。", "。")
+
+
 def _build_camera_views(image_size, front_fov):
     """Camera rig matching ``team_code/config_cp.py``."""
 
@@ -299,12 +625,20 @@ class COMsGenerator(base_commentary.COMsGenerator):
             self.data_boxes_paths = self.data_boxes_paths[:self.random_subset_count]
         self.data_boxes_paths.sort()
 
-        # The released repository does not contain commentary.json. The
-        # subsentence file contains the canonical templates expected by the
-        # original rule generator.
-        template_file = REPO_ROOT / "data/augmented_templates/commentary_subsentence.json"
+        # Keep the English canonical fragments for the released rule engine,
+        # then reassemble the selected semantics with dedicated Chinese
+        # templates in ``generate_commentary``.
+        template_file = (
+            REPO_ROOT / "data/augmented_templates/commentary_subsentence.json"
+        )
         with template_file.open("r", encoding="utf-8") as file:
             self.templates = ujson.load(file)
+        template_file_zh = (
+            REPO_ROOT
+            / "data/augmented_templates/commentary_subsentence_zh.json"
+        )
+        with template_file_zh.open("r", encoding="utf-8") as file:
+            self.templates_zh = ujson.load(file)
 
         self.list_next_junction_id_minus_one = []
         self.all_labels = []
@@ -327,6 +661,33 @@ class COMsGenerator(base_commentary.COMsGenerator):
                 path.replace("rgb", "boxes").replace(".jpg", ".json.gz")
                 for path in self.keyframes_list
             ]
+
+    def generate_commentary(
+        self,
+        current_boxes,
+        last_measurements_oldest_first,
+        future_measurements,
+        scenario_name,
+    ):
+        """Use original semantics and render the final text in Chinese."""
+
+        commentary, visible, cause_object, english_object = (
+            base_commentary.COMsGenerator.generate_commentary(
+                self,
+                current_boxes,
+                last_measurements_oldest_first,
+                future_measurements,
+                scenario_name,
+            )
+        )
+        object_zh = get_object_appearance_zh(cause_object, english_object)
+        commentary_zh = translate_commentary_zh(
+            commentary,
+            english_object,
+            object_zh,
+            self.templates_zh,
+        )
+        return commentary_zh, visible, cause_object, object_zh
 
     def create_commentary(self, path_id):
         """Run the original generator and append four-view CP fields."""
@@ -388,6 +749,29 @@ class COMsGenerator(base_commentary.COMsGenerator):
             "right_front"
         ]
         sample["cause_object_visible_in_image_rear"] = visibility["rear"]
+
+        commentary = sample.get("commentary", "")
+        cause_object_string = sample.get("cause_object_string")
+        commentary_template = commentary
+        placeholder = {}
+        if cause_object_string and cause_object_string in commentary_template:
+            commentary_template = commentary_template.replace(
+                cause_object_string, "<OBJECT>"
+            )
+            placeholder["<OBJECT>"] = cause_object_string
+
+        distance_match = re.search(r"-?\d+(?:\.\d+)?米", commentary_template)
+        if distance_match is not None:
+            distance_text = distance_match.group(0)
+            commentary_template = re.sub(
+                r"-?\d+(?:\.\d+)?米",
+                "<DISTANCE>",
+                commentary_template,
+            )
+            placeholder["<DISTANCE>"] = distance_text
+
+        sample["commentary_template"] = commentary_template
+        sample["placeholder"] = placeholder
 
         with gzip.open(output_path, "wt", encoding="utf-8") as file:
             json.dump(sample, file, ensure_ascii=False, indent=4)
