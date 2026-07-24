@@ -27,6 +27,27 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 _ACTIVE_CAMERA_VIEWS = ()
 
 
+COMMENTARY_OUTPUT_KEY_ORDER = (
+    "image",
+    "image_left_front",
+    "image_right_front",
+    "image_rear",
+    "commentary",
+    "commentary_with_weather_front",
+    "commentary_with_weather_rear",
+    "only_weather",
+    "commentary_template",
+    "placeholder",
+    "cause_object_string",
+    "cause_object",
+    "cause_object_visible_in_image",
+    "cause_object_visible_in_image_left_front",
+    "cause_object_visible_in_image_right_front",
+    "cause_object_visible_in_image_rear",
+    "scenario_name",
+)
+
+
 COLOR_NAMES_ZH = {
     "black": "黑色",
     "blue": "蓝色",
@@ -43,6 +64,74 @@ COLOR_NAMES_ZH = {
     "white": "白色",
     "yellow": "黄色",
 }
+
+
+def analyze_weather(weather_box):
+    """Map continuous CARLA weather parameters to one discrete category."""
+
+    if not weather_box:
+        return "unknown"
+
+    try:
+        sun_altitude = float(weather_box.get("sun_altitude_angle", 70.0))
+        precipitation = float(weather_box.get("precipitation", 0.0))
+        fog_density = float(weather_box.get("fog_density", 0.0))
+        cloudiness = float(weather_box.get("cloudiness", 0.0))
+    except (TypeError, ValueError):
+        return "unknown"
+
+    if sun_altitude < 0.0:
+        light = "night"
+    elif sun_altitude <= 15.0:
+        light = "twilight"
+    else:
+        light = "day"
+
+    # Use the most visually dominant condition when independently sampled
+    # CARLA parameters describe more than one phenomenon at the same time.
+    if fog_density >= 40.0:
+        condition = "dense_fog"
+    elif fog_density >= 10.0:
+        condition = "fog"
+    elif precipitation >= 60.0:
+        condition = "heavy_rain"
+    elif precipitation > 0.0:
+        condition = "rain"
+    elif cloudiness >= 60.0:
+        condition = "overcast"
+    else:
+        condition = "clear"
+
+    return f"{light}_{condition}"
+
+
+def render_weather_commentary(commentary, weather_text):
+    """Place one complete weather template before and after Commentary."""
+
+    commentary = commentary.strip()
+    weather_sentence = weather_text.strip()
+    if weather_sentence and weather_sentence[-1] not in "。！？":
+        weather_sentence += "。"
+    return (
+        f"{weather_sentence}{commentary}",
+        f"{commentary}{weather_sentence}",
+    )
+
+
+def order_commentary_sample(sample):
+    """Return a stable, human-readable field order without dropping extras."""
+
+    ordered = {
+        key: sample[key]
+        for key in COMMENTARY_OUTPUT_KEY_ORDER
+        if key in sample
+    }
+    ordered.update(
+        (key, value)
+        for key, value in sample.items()
+        if key not in ordered
+    )
+    return ordered
 
 
 def _vehicle_type_zh(object_box):
@@ -639,6 +728,11 @@ class COMsGenerator(base_commentary.COMsGenerator):
         )
         with template_file_zh.open("r", encoding="utf-8") as file:
             self.templates_zh = ujson.load(file)
+        weather_template_file = (
+            REPO_ROOT / "data/augmented_templates/weather_template.json"
+        )
+        with weather_template_file.open("r", encoding="utf-8") as file:
+            self.weather_templates = ujson.load(file)
 
         self.list_next_junction_id_minus_one = []
         self.all_labels = []
@@ -772,6 +866,35 @@ class COMsGenerator(base_commentary.COMsGenerator):
 
         sample["commentary_template"] = commentary_template
         sample["placeholder"] = placeholder
+
+        weather_box = None
+        try:
+            with gzip.open(boxes_path, "rt", encoding="utf-8") as file:
+                current_boxes = json.load(file)
+            weather_box = next(
+                (
+                    box
+                    for box in current_boxes
+                    if box.get("class") == "weather"
+                ),
+                None,
+            )
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+
+        weather_category = analyze_weather(weather_box)
+        weather_options = self.weather_templates.get(
+            weather_category,
+            self.weather_templates["unknown"],
+        )
+        only_weather = random.choice(weather_options)
+        commentary_with_weather_front, commentary_with_weather_rear = (
+            render_weather_commentary(commentary, only_weather)
+        )
+        sample["commentary_with_weather_front"] = commentary_with_weather_front
+        sample["commentary_with_weather_rear"] = commentary_with_weather_rear
+        sample["only_weather"] = only_weather
+        sample = order_commentary_sample(sample)
 
         with gzip.open(output_path, "wt", encoding="utf-8") as file:
             json.dump(sample, file, ensure_ascii=False, indent=4)
