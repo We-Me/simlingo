@@ -32,6 +32,7 @@ COMMENTARY_OUTPUT_KEY_ORDER = (
     "image_left_front",
     "image_right_front",
     "image_rear",
+    "lidar",
     "commentary",
     "commentary_with_weather_front",
     "commentary_with_weather_rear",
@@ -865,6 +866,9 @@ class COMsGenerator(base_commentary.COMsGenerator):
             "rear": boxes_path.replace("/boxes/", "/rgb_rear/").replace(
                 ".json.gz", ".jpg"
             ),
+            "lidar": boxes_path.replace("/boxes/", "/lidar/").replace(
+                ".json.gz", ".laz"
+            ),
         }
         visibility = visibility_by_view(
             sample.get("cause_object"),
@@ -877,6 +881,7 @@ class COMsGenerator(base_commentary.COMsGenerator):
         sample["image_left_front"] = image_paths["left_front"]
         sample["image_right_front"] = image_paths["right_front"]
         sample["image_rear"] = image_paths["rear"]
+        sample["lidar"] = image_paths["lidar"]
 
         sample["cause_object_visible_in_image"] = visibility["front"]
         sample["cause_object_visible_in_image_left_front"] = visibility[
