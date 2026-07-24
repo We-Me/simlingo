@@ -37,6 +37,7 @@ COMMENTARY_OUTPUT_KEY_ORDER = (
     "commentary_with_weather_rear",
     "only_weather",
     "commentary_template",
+    "waypoints",
     "placeholder",
     "cause_object_string",
     "cause_object",
@@ -788,9 +789,51 @@ class COMsGenerator(base_commentary.COMsGenerator):
 
         global _ACTIVE_CAMERA_VIEWS
         _ACTIVE_CAMERA_VIEWS = self.camera_views
+        boxes_path = self.data_boxes_paths[path_id]
+        measurements_path = boxes_path.replace("/boxes/", "/measurements/")
+        frame_number = int(Path(measurements_path).name.split(".", 1)[0])
+        final_future_path = measurements_path.replace(
+            f"{frame_number:04d}.json",
+            f"{frame_number + self.FUTURE_LEN:04d}.json",
+        )
+        if not os.path.isfile(final_future_path):
+            return None
+
         result = super().create_commentary(path_id)
-        self._append_four_view_fields(self.data_boxes_paths[path_id])
+        self._append_four_view_fields(boxes_path)
         return result
+
+    def _load_commentary_waypoints(self, boxes_path):
+        """Load the ten future training waypoints for the current frame."""
+
+        measurements_path = boxes_path.replace("/boxes/", "/measurements/")
+        frame_number = int(Path(measurements_path).name.split(".", 1)[0])
+        frame_number_text = f"{frame_number:04d}"
+
+        try:
+            with gzip.open(measurements_path, "rt", encoding="utf-8") as file:
+                current_measurement = json.load(file)
+
+            current_and_future_measurements = [current_measurement]
+            for offset in range(1, self.FUTURE_LEN + 1):
+                future_path = measurements_path.replace(
+                    f"{frame_number_text}.json",
+                    f"{frame_number + offset:04d}.json",
+                )
+                if not os.path.isfile(future_path):
+                    return None
+                with gzip.open(future_path, "rt", encoding="utf-8") as file:
+                    current_and_future_measurements.append(json.load(file))
+        except (OSError, ValueError, json.JSONDecodeError, TypeError):
+            return None
+
+        waypoints = base_commentary.COMsGenerator.get_waypoints(
+            self,
+            current_and_future_measurements,
+            y_augmentation=0.0,
+            yaw_augmentation=0.0,
+        )
+        return np.asarray(waypoints[1:], dtype=float).tolist()
 
     def _append_four_view_fields(self, boxes_path):
         if "/data/" not in boxes_path:
@@ -865,6 +908,9 @@ class COMsGenerator(base_commentary.COMsGenerator):
             placeholder["<DISTANCE>"] = distance_text
 
         sample["commentary_template"] = commentary_template
+        waypoints = self._load_commentary_waypoints(boxes_path)
+        if waypoints is not None:
+            sample["waypoints"] = waypoints
         sample["placeholder"] = placeholder
 
         weather_box = None
